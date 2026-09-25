@@ -6,14 +6,15 @@ import pandas as pd
 import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 from forecast_engine import parse_customer_file, aggregate_monthly, detect_top_influence, build_total_series, compare_models, forecast_future
 from outage_engine import parse_outage_workbook, estimate_outage_losses, normalize_series_for_outages
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
 from report_export import build_docx, build_pdf
+from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features, weather_ridge_forecast
 
-st.set_page_config(page_title="EVN Forecast 1.2", page_icon="⚡", layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.2.1", page_icon="⚡", layout="wide")
 
 st.markdown("""
 <style>
@@ -42,10 +43,37 @@ def get_secret(name, default=None):
     return os.getenv(name, default)
 
 @st.cache_data(show_spinner=False, ttl=3600)
-def fetch_open_meteo(lat,lon):
-    url="https://api.open-meteo.com/v1/forecast"
-    params={"latitude":lat,"longitude":lon,"daily":"temperature_2m_max,temperature_2m_min,precipitation_sum","forecast_days":16,"timezone":"Asia/Ho_Chi_Minh"}
-    r=requests.get(url,params=params,timeout=15); r.raise_for_status(); return r.json()
+def load_weather_forecast(lat, lon):
+    return fetch_forecast(lat, lon, forecast_days=16)
+
+
+@st.cache_data(show_spinner=False, ttl=86400)
+def load_weather_history(lat, lon, start_date, end_date):
+    return fetch_history(lat, lon, start_date, end_date)
+
+
+def combine_with_weather(base_fc, model_series, weather_hist, weather_fc):
+    """Kết hợp Adaptive Ensemble và hồi quy thời tiết theo sai số rolling."""
+    out=base_fc.copy()
+    out=out.rename(columns={"forecast":"forecast_base_ensemble"})
+    try:
+        wf, weather_mape=weather_ridge_forecast(model_series, weather_hist, weather_fc, horizon=len(out))
+    except Exception:
+        wf, weather_mape=pd.DataFrame(), np.nan
+    base_bt=compare_models(model_series)
+    base_mape=float(base_bt.iloc[0]["MAPE_1step"]) if not base_bt.empty else np.nan
+    if not wf.empty:
+        out=out.merge(wf[["date","forecast_weather_ridge"]],on="date",how="left")
+    else:
+        out["forecast_weather_ridge"]=np.nan
+    if np.isfinite(weather_mape) and weather_mape>0 and np.isfinite(base_mape) and base_mape>0:
+        wb=1/(base_mape**2); ww=1/(weather_mape**2); sw=wb+ww
+        wb,ww=wb/sw,ww/sw
+        out["forecast"]=np.where(out["forecast_weather_ridge"].notna(), wb*out["forecast_base_ensemble"]+ww*out["forecast_weather_ridge"], out["forecast_base_ensemble"])
+    else:
+        wb,ww=1.0,0.0
+        out["forecast"]=out["forecast_base_ensemble"]
+    return out,{"AdaptiveEnsemble":float(wb),"WeatherRidge":float(ww)},weather_mape
 
 
 def ai_explain(summary_text):
@@ -68,7 +96,7 @@ def card(title,value,subtitle=""):
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state(STATE_PATH)
 
-st.sidebar.title("⚡ EVN Forecast 1.2")
+st.sidebar.title("⚡ EVN Forecast 1.2.1")
 st.sidebar.caption("Web • Adaptive • Outage Detail • Model State • Auto Report")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"],key="state_upload")
 if state_upload and st.sidebar.button("Khôi phục trạng thái"):
@@ -110,10 +138,11 @@ WEATHER_LAT = 19.90389
 WEATHER_LON = 105.34889
 st.sidebar.text_input("Địa điểm dự báo", value=WEATHER_LOCATION_NAME, disabled=True)
 st.sidebar.caption(f"Tọa độ cố định: {WEATHER_LAT:.5f}, {WEATHER_LON:.5f} • Không dùng Thọ Xuân/Như Xuân")
+weather_mode=st.sidebar.selectbox("Chế độ thời tiết",["Tự động cho mô hình","Theo ngày","Theo tháng"],index=0)
 lat=WEATHER_LAT
 lon=WEATHER_LON
 
-st.title("⚡ EVN Forecast 1.2 – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.2.1 – Điện lực Thường Xuân")
 st.caption("Dashboard thích ứng • Mất điện theo giờ/KH • Model State • Word/PDF tự động")
 
 frames=[]
@@ -159,14 +188,24 @@ if outage_monthly.empty and fallback_hours>0 and fallback_impact>0:
 series_norm=normalize_series_for_outages(series_actual,outage_monthly)
 model_series=series_norm[["date","normalized_actual"]].rename(columns={"normalized_actual":"actual"})
 backtest=compare_models(model_series)
-fc3,weights=forecast_future(model_series,horizon=3)
+base_fc3,weights=forecast_future(model_series,horizon=3)
 top100=detect_top_influence(customer_long,100) if not customer_long.empty else pd.DataFrame()
 latest=series_norm.iloc[-1]; prev=series_norm.iloc[-2] if len(series_norm)>1 else None
 latest_month=pd.to_datetime(latest['date']).strftime('%Y_%m')
 
-weather=None
-try: weather=fetch_open_meteo(float(lat),float(lon))
-except Exception: pass
+# Weather: khóa xã Thường Xuân, hỗ trợ dữ liệu ngày + kịch bản chỉnh tay.
+weather_forecast=pd.DataFrame(); weather_history=pd.DataFrame(); weather_error=None
+try:
+    weather_forecast=load_weather_forecast(float(lat),float(lon))
+    overrides=st.session_state.model_state.get("weather_overrides",[])
+    weather_forecast=apply_overrides(weather_forecast,overrides)
+    hist_start=max(pd.Timestamp("2022-01-01"),pd.to_datetime(model_series["date"].min())-pd.offsets.MonthBegin(2))
+    hist_end=pd.Timestamp(date.today()-timedelta(days=1))
+    weather_history=load_weather_history(float(lat),float(lon),hist_start.strftime("%Y-%m-%d"),hist_end.strftime("%Y-%m-%d"))
+except Exception as e:
+    weather_error=str(e)
+
+fc3,weather_weights,weather_mape=combine_with_weather(base_fc3,model_series,weather_history,weather_forecast)
 
 c1,c2,c3,c4,c5=st.columns(5)
 with c1: card("Tháng mới nhất",pd.to_datetime(latest['date']).strftime('%m/%Y'),"")
@@ -186,7 +225,7 @@ if not outage_monthly.empty:
     st.markdown(f'<div class="info-card"><b>⚡ Mất điện:</b> điện năng ước không thực hiện trong các tháng có nhật ký: <b>{fmt_int(total_lost)} kWh</b>. Mô hình dùng chuỗi chuẩn hóa để học xu hướng nhưng vẫn giữ số thực tế để báo cáo.</div>',unsafe_allow_html=True)
 
 # Tabs
-t1,t2,t3,t4,t5,t6,t7=st.tabs(["📊 Dashboard","⚡ Mất điện","👥 Top 100","📈 Kiểm định","🔮 Dự báo","💾 Model State","📄 Báo cáo & AI"])
+t1,t2,t3,t4,t5,t6,t7,t8=st.tabs(["📊 Dashboard","⚡ Mất điện","👥 Top 100","📈 Kiểm định","🔮 Dự báo","🌦️ Thời tiết","💾 Model State","📄 Báo cáo & AI"])
 
 with t1:
     left,right=st.columns([2,1])
@@ -202,12 +241,13 @@ with t1:
         st.subheader("Trọng số Adaptive Ensemble")
         wdf=pd.DataFrame({"Mô hình":list(weights.keys()),"Trọng số":list(weights.values())})
         if not wdf.empty: st.plotly_chart(px.pie(wdf,names='Mô hình',values='Trọng số',hole=.55),use_container_width=True)
-    if weather:
-        daily=weather.get('daily',{})
-        wdf=pd.DataFrame({"Ngày":daily.get('time',[]),"Tmax":daily.get('temperature_2m_max',[]),"Tmin":daily.get('temperature_2m_min',[]),"Mưa":daily.get('precipitation_sum',[])})
+    if not weather_forecast.empty:
+        wdf=weather_forecast.rename(columns={"date":"Ngày","tmax":"Tmax","tmin":"Tmin","tavg":"Tavg","rain_mm":"Mưa (mm)","sunshine_h":"Nắng (giờ)"})
         st.subheader(f"🌦️ Thời tiết 16 ngày tới – {WEATHER_LOCATION_NAME}")
-        st.caption(f"Nguồn Open-Meteo tại tọa độ cố định {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
+        st.caption(f"Nguồn Open-Meteo tại tọa độ cố định {WEATHER_LAT:.5f}, {WEATHER_LON:.5f} • có thể chọn/chỉnh theo ngày ở tab Thời tiết")
         st.dataframe(wdf,use_container_width=True,hide_index=True)
+    elif weather_error:
+        st.warning(f"Chưa tải được dữ liệu thời tiết: {weather_error}")
 
 with t2:
     st.subheader("Nhật ký mất điện chi tiết")
@@ -246,7 +286,7 @@ with t3:
         q=st.select_slider("Số khách hàng hiển thị biểu đồ",options=[10,20,30,50],value=20)
         chart=top100.head(q).sort_values('delta_kwh')
         st.plotly_chart(px.bar(chart,x='delta_kwh',y='customer_name',orientation='h',title=f"Top {q} biến động kWh"),use_container_width=True)
-        st.download_button("⬇️ Tải Top100 CSV",top100.to_csv(index=False).encode('utf-8-sig'),"Top100_EVN_Forecast_1_2.csv","text/csv")
+        st.download_button("⬇️ Tải Top100 CSV",top100.to_csv(index=False).encode('utf-8-sig'),"Top100_EVN_Forecast_1_2_1.csv","text/csv")
 
 with t4:
     st.caption("Kiểm định được thực hiện trên chuỗi đã chuẩn hóa ảnh hưởng mất điện khi có dữ liệu chi tiết.")
@@ -258,9 +298,11 @@ with t4:
 
 with t5:
     horizon=st.selectbox("Tầm dự báo",[1,3,6,12],index=1)
-    fc,weights_h=forecast_future(model_series,horizon=horizon)
+    base_fc,weights_h=forecast_future(model_series,horizon=horizon)
+    fc,weather_weights_h,weather_mape_h=combine_with_weather(base_fc,model_series,weather_history,weather_forecast)
     st.dataframe(fc,use_container_width=True,hide_index=True)
-    st.write("**Trọng số:**",{k:round(v,4) for k,v in weights_h.items()})
+    st.write("**Trọng số mô hình chuỗi:**",{k:round(v,4) for k,v in weights_h.items()})
+    st.write("**Kết hợp thời tiết:**",{k:round(v,4) for k,v in weather_weights_h.items()}, f"• Weather Ridge MAPE: {weather_mape_h:.2f}%" if np.isfinite(weather_mape_h) else "• Chưa đủ dữ liệu để kiểm định Weather Ridge")
     out=io.BytesIO()
     with pd.ExcelWriter(out,engine='openpyxl') as writer:
         series_norm.to_excel(writer,sheet_name='Lich_su_chuan_hoa',index=False)
@@ -273,6 +315,69 @@ with t5:
     st.download_button("⬇️ Xuất Excel",out.getvalue(),"EVN_Forecast_1.2_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 with t6:
+    st.subheader(f"🌦️ Thời tiết theo ngày – {WEATHER_LOCATION_NAME}")
+    st.caption("Địa điểm được khóa cố định. Có thể chọn ngày/khoảng ngày, xem nhiệt độ và tạo kịch bản thủ công. Kịch bản chỉ thay đổi dữ liệu dự báo thời tiết, không ghi đè số liệu lịch sử.")
+    if weather_forecast.empty:
+        st.warning(f"Chưa tải được thời tiết. {weather_error or ''}")
+    else:
+        min_d=weather_forecast['date'].min().date(); max_d=weather_forecast['date'].max().date()
+        picked=st.date_input("Chọn ngày hoặc khoảng ngày",value=(min_d,max_d),min_value=min_d,max_value=max_d,key="weather_date_range")
+        if isinstance(picked,(tuple,list)) and len(picked)==2:
+            d1,d2=picked
+        else:
+            d1=d2=picked if not isinstance(picked,(tuple,list)) else picked[0]
+        sel=weather_forecast[(weather_forecast['date'].dt.date>=d1)&(weather_forecast['date'].dt.date<=d2)].copy()
+        if not sel.empty:
+            a,b,c,d,e=st.columns(5)
+            a.metric("Nhiệt độ TB",f"{sel['tavg'].mean():.1f} °C")
+            b.metric("Cao nhất",f"{sel['tmax'].max():.1f} °C")
+            c.metric("Ngày ≥35°C",f"{int((sel['tmax']>=35).sum())}")
+            d.metric("Ngày ≥37°C",f"{int((sel['tmax']>=37).sum())}")
+            e.metric("Tổng mưa",f"{sel['rain_mm'].sum():.1f} mm")
+            figw=go.Figure()
+            figw.add_trace(go.Scatter(x=sel['date'],y=sel['tmax'],mode='lines+markers',name='Tmax'))
+            figw.add_trace(go.Scatter(x=sel['date'],y=sel['tmin'],mode='lines+markers',name='Tmin'))
+            figw.add_trace(go.Scatter(x=sel['date'],y=sel['tavg'],mode='lines+markers',name='Tavg'))
+            figw.update_layout(title="Nhiệt độ theo ngày",yaxis_title="°C",hovermode="x unified",height=380)
+            st.plotly_chart(figw,use_container_width=True)
+            st.plotly_chart(px.bar(sel,x='date',y='rain_mm',title="Lượng mưa theo ngày (mm)"),use_container_width=True)
+            view=sel[['date','tmax','tmin','tavg','rain_mm','sunshine_h']].copy()
+            view.columns=['Ngày','Tmax °C','Tmin °C','Tavg °C','Mưa mm','Nắng giờ']
+            st.dataframe(view,use_container_width=True,hide_index=True)
+
+            st.markdown("#### 🧪 Kịch bản nhiệt độ theo ngày")
+            st.caption("Sửa Tmax/Tmin/Mưa cho các ngày đã chọn, sau đó bấm Áp dụng. Mô hình Weather Ridge sẽ dùng kịch bản này ở lần chạy tiếp theo.")
+            editor=sel[['date','tmax','tmin','rain_mm','sunshine_h']].copy()
+            edited=st.data_editor(editor,use_container_width=True,hide_index=True,disabled=['date'],key="weather_editor")
+            x1,x2=st.columns(2)
+            if x1.button("✅ Áp dụng kịch bản thời tiết",type="primary",use_container_width=True):
+                existing={pd.Timestamp(r['date']).strftime('%Y-%m-%d'):r for r in st.session_state.model_state.get('weather_overrides',[]) if 'date' in r}
+                for _,r in edited.iterrows():
+                    key=pd.Timestamp(r['date']).strftime('%Y-%m-%d')
+                    existing[key]={"date":key,"tmax":float(r['tmax']),"tmin":float(r['tmin']),"rain_mm":float(r['rain_mm']),"sunshine_h":float(r['sunshine_h'])}
+                st.session_state.model_state['weather_overrides']=list(existing.values())
+                save_state(st.session_state.model_state,STATE_PATH)
+                st.success("Đã lưu kịch bản thời tiết. Ứng dụng sẽ tính lại dự báo.")
+                st.rerun()
+            if x2.button("🗑️ Xóa toàn bộ kịch bản thời tiết",use_container_width=True):
+                st.session_state.model_state['weather_overrides']=[]
+                save_state(st.session_state.model_state,STATE_PATH)
+                st.success("Đã xóa kịch bản thời tiết.")
+                st.rerun()
+
+        st.markdown("#### 📅 Tổng hợp biến thời tiết cho mô hình")
+        wm=monthly_features(weather_forecast)
+        if not wm.empty:
+            st.dataframe(wm,use_container_width=True,hide_index=True)
+        futw=future_month_features(weather_history,weather_forecast,model_series['date'].iloc[-1],horizon=3) if not weather_history.empty else pd.DataFrame()
+        if not futw.empty:
+            st.markdown("**Biến thời tiết ước tính cho 3 tháng dự báo**")
+            st.dataframe(futw,use_container_width=True,hide_index=True)
+            st.download_button("⬇️ Tải biến thời tiết CSV",futw.to_csv(index=False).encode('utf-8-sig'),"Weather_Features_Thuong_Xuan.csv","text/csv")
+        if np.isfinite(weather_mape):
+            st.info(f"Weather Ridge rolling MAPE hiện tại: {weather_mape:.2f}%. Kết quả được kết hợp với Adaptive Ensemble theo trọng số nghịch đảo sai số.")
+
+with t7:
     st.subheader("Model State")
     st.json(st.session_state.model_state)
     col1,col2=st.columns(2)
@@ -280,6 +385,8 @@ with t6:
         state=st.session_state.model_state
         state['latest_month']=latest_month
         state['model_weights']={k:float(v) for k,v in weights.items()}
+        state['weather_blend_weights']={k:float(v) for k,v in weather_weights.items()}
+        state['weather_mape']=float(weather_mape) if np.isfinite(weather_mape) else None
         state['backtest']=backtest.replace({np.nan:None}).to_dict(orient='records') if not backtest.empty else []
         state['notes']=manual_note
         if not outage_monthly.empty:
@@ -290,7 +397,7 @@ with t6:
     col2.download_button("⬇️ Tải Model State",state_to_bytes(st.session_state.model_state),"model_state.json","application/json",use_container_width=True)
     st.caption("Streamlit Community Cloud có thể khởi động lại server. Hãy tải model_state.json làm bản sao.")
 
-with t7:
+with t8:
     st.subheader("Xuất báo cáo tự động")
     docx_bytes=build_docx(series_norm,fc3,backtest,top100,st.session_state.model_state,outage_monthly,outage_details)
     pdf_bytes=build_pdf(series_norm,fc3,backtest,top100,st.session_state.model_state,outage_monthly,outage_details)
@@ -302,7 +409,7 @@ with t7:
     outage_summary = outage_monthly.to_string(index=False) if not outage_monthly.empty else "Không có dữ liệu mất điện chi tiết."
     summary=(f"Tháng mới nhất {pd.to_datetime(latest['date']).strftime('%m/%Y')}: thực tế {latest['actual']:.0f} kWh; chuẩn hóa {latest.get('normalized_actual',latest['actual']):.0f} kWh.\n"
              f"Mất điện:\n{outage_summary}\nBacktest:\n{backtest.to_string(index=False)}\nDự báo 3 tháng:\n{fc3.to_string(index=False)}\n"
-             f"Trọng số: {weights}. Ghi chú: {manual_note}")
+             f"Trọng số chuỗi: {weights}; trọng số thời tiết: {weather_weights}; Weather MAPE: {weather_mape if np.isfinite(weather_mape) else 'N/A'}. Ghi chú: {manual_note}")
     if st.button("🤖 Phân tích bằng ChatGPT",use_container_width=True):
         with st.spinner("Đang phân tích..."):
             txt,err=ai_explain(summary)
@@ -310,4 +417,4 @@ with t7:
         else: st.warning(err)
 
 st.divider()
-st.caption("EVN Forecast 1.2 Web • Adaptive Forecast • Outage Detail • Model State • Auto Word/PDF")
+st.caption("EVN Forecast 1.2.1 Web • Adaptive Forecast • Outage Detail • Model State • Auto Word/PDF")
