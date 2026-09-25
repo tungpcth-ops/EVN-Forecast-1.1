@@ -103,8 +103,15 @@ with st.sidebar.expander("Hiệu chỉnh tổng hợp dự phòng"):
 manual_note=st.sidebar.text_area("Ghi chú vận hành",value=st.session_state.model_state.get("notes", ""),height=80)
 
 st.sidebar.subheader("4) Thời tiết")
-lat=st.sidebar.number_input("Vĩ độ",value=19.90,format="%.4f")
-lon=st.sidebar.number_input("Kinh độ",value=105.35,format="%.4f")
+# Khóa địa điểm thời tiết theo đúng xã Thường Xuân, tỉnh Thanh Hóa.
+# Tọa độ trung tâm xã: khoảng 19.90389 N, 105.34889 E.
+WEATHER_LOCATION_NAME = "Xã Thường Xuân, tỉnh Thanh Hóa"
+WEATHER_LAT = 19.90389
+WEATHER_LON = 105.34889
+st.sidebar.text_input("Địa điểm dự báo", value=WEATHER_LOCATION_NAME, disabled=True)
+st.sidebar.caption(f"Tọa độ cố định: {WEATHER_LAT:.5f}, {WEATHER_LON:.5f} • Không dùng Thọ Xuân/Như Xuân")
+lat=WEATHER_LAT
+lon=WEATHER_LON
 
 st.title("⚡ EVN Forecast 1.2 – Điện lực Thường Xuân")
 st.caption("Dashboard thích ứng • Mất điện theo giờ/KH • Model State • Word/PDF tự động")
@@ -198,7 +205,9 @@ with t1:
     if weather:
         daily=weather.get('daily',{})
         wdf=pd.DataFrame({"Ngày":daily.get('time',[]),"Tmax":daily.get('temperature_2m_max',[]),"Tmin":daily.get('temperature_2m_min',[]),"Mưa":daily.get('precipitation_sum',[])})
-        st.subheader("🌦️ Thời tiết 16 ngày tới"); st.dataframe(wdf,use_container_width=True,hide_index=True)
+        st.subheader(f"🌦️ Thời tiết 16 ngày tới – {WEATHER_LOCATION_NAME}")
+        st.caption(f"Nguồn Open-Meteo tại tọa độ cố định {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
+        st.dataframe(wdf,use_container_width=True,hide_index=True)
 
 with t2:
     st.subheader("Nhật ký mất điện chi tiết")

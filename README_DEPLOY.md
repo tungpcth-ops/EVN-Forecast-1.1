@@ -56,3 +56,7 @@ Tải các file sau đè lên repository cũ:
 - `README_DEPLOY.md`
 
 `requirements.txt` của 1.1 vẫn dùng được.
+
+
+## Khóa địa điểm thời tiết
+Bản cập nhật này cố định nguồn thời tiết cho **Xã Thường Xuân, tỉnh Thanh Hóa** tại tọa độ trung tâm khoảng **19.90389, 105.34889**. Người dùng không thể đổi sang Thọ Xuân/Như Xuân từ giao diện, giúp EVN Forecast sử dụng nhất quán đúng địa bàn quản lý.
