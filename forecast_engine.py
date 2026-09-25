@@ -1,4 +1,5 @@
 import re
+import math
 import numpy as np
 import pandas as pd
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
@@ -41,7 +42,7 @@ def parse_customer_file(fileobj, year):
         tmp = pd.DataFrame({
             "customer_id": df[cid].astype(str),
             "customer_name": df[cname].astype(str),
-            "date": pd.to_datetime({"year": year, "month": month, "day": 1}),
+            "date": pd.Timestamp(year=int(year), month=int(month), day=1),
             "kwh": vals,
         })
         # preserve optional metadata

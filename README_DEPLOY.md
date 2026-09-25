@@ -1,51 +1,58 @@
-# EVN Forecast 1.1 Web Deploy
+# EVN Forecast 1.2 Web – Điện lực Thường Xuân
 
-Phiên bản 1.1 bổ sung:
-- Nút **Cập nhật tháng mới**.
-- **Model State** lưu trọng số, lịch sử backtest, lịch sử dự báo, sự kiện và ghi chú.
-- Tải/khôi phục `model_state.json` để sao lưu trạng thái.
-- Dashboard mới: KPI cards, biểu đồ thực tế + dự báo, trọng số ensemble, cảnh báo KH biến động lớn.
-- Xuất **Excel / Word / PDF** tự động.
-- ChatGPT/OpenAI phân tích kết quả nếu cấu hình API key.
+## Điểm mới 1.2
+- Nhật ký mất điện theo **ngày + giờ bắt đầu + giờ kết thúc**.
+- Danh sách **khách hàng bị mất điện theo từng sự cố**.
+- Tự tính số giờ mất điện; hỗ trợ sự cố qua 0 giờ.
+- Ước tính điện năng không thực hiện theo từng khách hàng.
+- Chuỗi `actual` vẫn giữ nguyên để báo cáo; chuỗi `normalized_actual = actual + lost_kwh` dùng để học xu hướng/dự báo.
+- Dashboard hiển thị Thực tế / Chuẩn hóa / Dự báo.
+- Model State lưu thêm lịch sử ảnh hưởng mất điện.
+- Word/PDF/Excel có phần phân tích mất điện.
 
-## Deploy không cần cài đặt trên máy
-1. Giải nén thư mục.
-2. Đưa toàn bộ nội dung lên một GitHub repository.
-3. Vào https://share.streamlit.io
-4. Chọn repository và file `streamlit_app.py`.
-5. Bấm Deploy.
+## File nhật ký mất điện
+Dùng file `Mau_Nhat_ky_mat_dien.xlsx`.
 
-## OpenAI API (tùy chọn)
-Trong Streamlit Cloud > App settings > Secrets:
+### Sheet `Su_co`
+- `SU_CO_ID`
+- `NGAY`
+- `GIO_BAT_DAU`
+- `GIO_KET_THUC`
+- `TEN_TBA`
+- `PHAM_VI`
+- `NGUYEN_NHAN`
+- `TY_LE_PHU_TAI_ANH_HUONG`
+- `GHI_CHU`
 
-```toml
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-5.6-luna"
-```
+### Sheet `KH_mat_dien`
+- `SU_CO_ID`
+- `MA_KHANG`
+- `TEN_KHANG`
+- `KWH_GIO_UOC_TINH` (không bắt buộc)
+- `CONG_SUAT_KW` (không bắt buộc)
+- `HE_SO_KHUNG_GIO` (không bắt buộc, mặc định 1.0)
 
-Không đưa API key vào GitHub.
+Mỗi khách hàng bị ảnh hưởng là một dòng. Một sự cố có nhiều khách hàng thì lặp `SU_CO_ID`.
 
-## Model State
-Streamlit Community Cloud có thể khởi động lại server nên file cục bộ không phải lưu trữ bền vững tuyệt đối.
-EVN Forecast 1.1 vì vậy có 2 lớp:
-1. Lưu `model_state.json` trên server hiện tại.
-2. Nút **Tải Model State** để người dùng sao lưu; khi cần dùng **Khôi phục trạng thái**.
+## Cách ước tính điện năng mất
+Ưu tiên theo thứ tự:
+1. `KWH_GIO_UOC_TINH` do người dùng nhập.
+2. `CONG_SUAT_KW` do người dùng nhập.
+3. Điện năng lịch sử của chính khách hàng: trung bình 3 tháng gần nhất, kết hợp cùng kỳ năm trước nếu có.
+4. Nếu không có mã khách hàng: phụ tải tổng tháng x số giờ x tỷ lệ ảnh hưởng.
 
-Nếu triển khai trên VPS/server ổn định, `model_state.json` sẽ được giữ theo ổ đĩa của server.
+## Deploy
+Giữ nguyên các file trong thư mục gốc GitHub và main file là `streamlit_app.py`.
+Streamlit Cloud sẽ tự redeploy khi GitHub có commit mới.
 
-## Quy trình hàng tháng
-1. Nạp dữ liệu nền (hoặc khôi phục Model State).
-2. Nạp file có tháng mới.
-3. Bấm **Cập nhật tháng mới**.
-4. Xem Dashboard, Top 100, Backtest.
-5. Điều chỉnh số ngày mất điện / ghi chú vận hành nếu có.
-6. Bấm **Lưu Model State**.
-7. Xuất Excel/Word/PDF.
+## Nâng từ 1.1 lên 1.2 trên GitHub
+Tải các file sau đè lên repository cũ:
+- `streamlit_app.py`
+- `forecast_engine.py`
+- `state_manager.py`
+- `report_export.py`
+- `outage_engine.py` (mới)
+- `Mau_Nhat_ky_mat_dien.xlsx` (mới)
+- `README_DEPLOY.md`
 
-## Cấu trúc
-- `streamlit_app.py`: giao diện web.
-- `forecast_engine.py`: mô hình dự báo và backtest.
-- `state_manager.py`: lưu/khôi phục Model State.
-- `report_export.py`: xuất Word/PDF.
-- `requirements.txt`: thư viện.
-- `.streamlit/`: cấu hình deploy.
+`requirements.txt` của 1.1 vẫn dùng được.
