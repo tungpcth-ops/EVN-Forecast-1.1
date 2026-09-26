@@ -3,7 +3,7 @@ from pathlib import Path
 from datetime import datetime
 
 DEFAULT_STATE = {
-    "version": "1.2",
+    "version": "1.4",
     "updated_at": None,
     "latest_month": None,
     "model_weights": {},
@@ -12,6 +12,7 @@ DEFAULT_STATE = {
     "events": [],
     "outage_history": [],
     "notes": "",
+    "pcth_mode": {},
 }
 
 
@@ -32,7 +33,7 @@ def load_state(path="model_state.json"):
 
 def save_state(state, path="model_state.json"):
     state = dict(state)
-    state["version"] = "1.2"
+    state["version"] = "1.4"
     state["updated_at"] = datetime.now().isoformat(timespec="seconds")
     Path(path).write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     return state

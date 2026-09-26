@@ -107,7 +107,7 @@ def parse_outage_workbook(fileobj):
     c_end = _find_col(ev, ["GIO_KET_THUC", "Giờ kết thúc", "Kết thúc", "End"], required=True)
     c_tba = _find_col(ev, ["TEN_TBA", "TBA", "Trạm", "Phạm vi TBA"])
     c_scope = _find_col(ev, ["PHAM_VI", "Phạm vi", "Đường dây", "Khu vực"])
-    c_reason = _find_col(ev, ["NGUYEN_NHAN", "Nguyên nhân", "Reason"])
+    c_reason = _find_col(ev, ["NGUYEN_NHAN", "NGUYEN_NHAN_SAI_SO", "Nguyên nhân", "Nguyên nhân sai số", "Reason"])
     c_impact = _find_col(ev, ["TY_LE_PHU_TAI_ANH_HUONG", "Tỷ lệ phụ tải ảnh hưởng", "% phụ tải ảnh hưởng", "Impact pct"])
     c_note = _find_col(ev, ["GHI_CHU", "Ghi chú", "Note"])
     c_cust = _find_col(ev, ["MA_KHANG", "Mã khách hàng", "Mã KH", "customer_id"])
@@ -149,10 +149,12 @@ def parse_outage_workbook(fileobj):
         d_kw = _find_col(det, ["CONG_SUAT_KW", "Công suất kW", "kW"])
         d_kwhh = _find_col(det, ["KWH_GIO_UOC_TINH", "kWh/giờ ước tính", "kWh giờ", "kwh_per_hour"])
         d_factor = _find_col(det, ["HE_SO_KHUNG_GIO", "Hệ số khung giờ", "Hệ số phụ tải", "load_factor"])
+        d_reason = _find_col(det, ["NGUYEN_NHAN_SAI_SO", "Nguyên nhân sai số", "NGUYEN_NHAN", "Nguyên nhân"])
         dd = pd.DataFrame({
             "event_id": det[d_id].astype(str),
             "customer_id": det[d_cust].astype(str),
             "customer_name_detail": det[d_name].astype(str) if d_name else "",
+            "error_reason_detail": det[d_reason].astype(str) if d_reason else "",
             "power_kw_detail": pd.to_numeric(det[d_kw], errors="coerce") if d_kw else np.nan,
             "kwh_per_hour_detail": pd.to_numeric(det[d_kwhh], errors="coerce") if d_kwhh else np.nan,
             "time_factor_detail": pd.to_numeric(det[d_factor], errors="coerce").fillna(1.0) if d_factor else 1.0,
@@ -168,6 +170,9 @@ def parse_outage_workbook(fileobj):
         })
         out["customer_id"] = out["customer_id"].fillna("").astype(str)
         out["customer_name"] = out["customer_name"].fillna("").astype(str)
+        if "error_reason_detail" in out.columns:
+            er = out["error_reason_detail"].fillna("").astype(str)
+            out["reason"] = np.where(er.str.strip().ne(""), er, out["reason"])
 
     out = out.dropna(subset=["date", "duration_hours"]).copy()
     out["duration_hours"] = pd.to_numeric(out["duration_hours"], errors="coerce").fillna(0).clip(lower=0, upper=168)
@@ -268,7 +273,16 @@ def estimate_outage_losses(outage_rows, customer_long=None, total_series=None):
     d["lost_kwh"] = losses
     d["month"] = pd.to_datetime(d["date"]).dt.to_period("M").dt.to_timestamp()
 
-    monthly = d.dropna(subset=["lost_kwh"]).groupby("month", as_index=False)["lost_kwh"].sum().rename(columns={"month": "date"})
+    valid = d.dropna(subset=["lost_kwh"]).copy()
+    if valid.empty:
+        monthly = pd.DataFrame(columns=["date","lost_kwh","outage_hours","affected_customers","event_count"])
+    else:
+        monthly = valid.groupby("month", as_index=False).agg(
+            lost_kwh=("lost_kwh","sum"),
+            outage_hours=("duration_hours","sum"),
+            affected_customers=("customer_id", lambda x: x.astype(str).replace({"":"nan"}).loc[lambda z: ~z.str.lower().isin(["nan","none"])].nunique()),
+            event_count=("event_id","nunique"),
+        ).rename(columns={"month":"date"})
     return d, monthly
 
 
