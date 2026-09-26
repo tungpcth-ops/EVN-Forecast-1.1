@@ -14,8 +14,9 @@ from multi_model_engine import (
 from outage_engine import parse_outage_workbook, estimate_outage_losses, normalize_series_for_outages
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
+from ai_engine import get_openai_config, ask_openai
 
-st.set_page_config(page_title="EVN Forecast 1.4.1 Multi-Model",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5 AI",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -41,8 +42,8 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.4.1")
-st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage")
+st.sidebar.title("⚡ EVN Forecast 1.5 AI")
+st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • ChatGPT AI")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
     try:
@@ -74,7 +75,7 @@ st.sidebar.subheader("4) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.4.1 Multi-Model – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.5 AI – Điện lực Thường Xuân")
 st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
@@ -208,7 +209,7 @@ if best is not None and pd.notna(best.MAPE) and best.MAPE>1.5:
     st.markdown(f'<div class="note"><b>⚠️ MAPE kiểm định tốt nhất hiện {best.MAPE:.2f}%</b> – chưa đạt mục tiêu 1,5%. Hệ thống vẫn chọn trọng số theo back-test và hiển thị nguyên nhân để tiếp tục hiệu chỉnh.</div>',unsafe_allow_html=True)
 
 # -------- tabs --------
-t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","💾 Model State","📤 Xuất dữ liệu"])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 ChatGPT AI","💾 Model State","📤 Xuất dữ liệu"])
 
 with t1:
     fig=go.Figure()
@@ -335,6 +336,91 @@ with t7:
             st.dataframe(pd.concat([ch.nlargest(10,"chenh_kwh"),ch.nsmallest(10,"chenh_kwh")]).drop_duplicates().sort_values("chenh_kwh").style.format({"kwh_thang":"{:,.0f}","kwh_truoc":"{:,.0f}","chenh_kwh":"{:+,.0f}"}),use_container_width=True,hide_index=True)
 
 with t8:
+    st.subheader("🤖 ChatGPT AI – Phân tích EVN Forecast")
+    st.caption("AI chỉ nhận dữ liệu tổng hợp cần thiết, không gửi toàn bộ 20.000+ khách hàng. Mặc định tên KH được ẩn; chỉ bật nếu anh chủ động cho phép.")
+
+    secret_key, secret_model = get_openai_config(st)
+    ai_model = st.text_input("Model OpenAI", value=secret_model, help="Có thể đặt OPENAI_MODEL trong Streamlit Secrets.")
+    session_key = st.text_input("API key phiên làm việc (tùy chọn)", type="password", help="Chỉ dùng trong phiên hiện tại, không lưu vào GitHub. Nên cấu hình OPENAI_API_KEY trong Streamlit Secrets.")
+    api_key = session_key.strip() or secret_key
+    include_names = st.checkbox("Cho phép gửi tên Top KH tới AI", value=False)
+    if api_key:
+        st.success("Đã phát hiện OpenAI API key. AI sẵn sàng.")
+    else:
+        st.warning("Chưa có OpenAI API key. Vào Streamlit > Manage app > Settings > Secrets và thêm OPENAI_API_KEY.")
+
+    err_detail_ai, err_summary_ai = build_error_report(st.session_state.model_state, series_actual)
+    latest_month = pd.to_datetime(series_actual.date).max().to_period("M").to_timestamp()
+    prev_month = latest_month - pd.DateOffset(months=1)
+
+    # Customer change summary: only Top 20 and hide names by default
+    cur = customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==latest_month].groupby(["customer_id","customer_name"],as_index=False).kwh.sum().rename(columns={"kwh":"current_kwh"})
+    prv = customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==prev_month].groupby(["customer_id","customer_name"],as_index=False).kwh.sum().rename(columns={"kwh":"previous_kwh"})
+    changes = cur.merge(prv,on=["customer_id","customer_name"],how="outer").fillna(0)
+    changes["delta_kwh"] = changes.current_kwh - changes.previous_kwh
+    changes = pd.concat([changes.nlargest(10,"delta_kwh"), changes.nsmallest(10,"delta_kwh")]).drop_duplicates("customer_id")
+    if not include_names and not changes.empty:
+        changes = changes.copy(); changes["customer_name"] = "(ẩn tên KH)"
+
+    # Weather latest/future summary
+    weather_payload = {}
+    if not hist_weather.empty:
+        wh = hist_weather.copy(); wh["date"] = pd.to_datetime(wh.date)
+        weather_payload["recent_months"] = wh.tail(4).to_dict("records")
+    if not fut_weather.empty:
+        weather_payload["forecast_months"] = fut_weather.head(max(horizon,1)).to_dict("records")
+
+    outage_payload = outage_monthly.tail(6).to_dict("records") if not outage_monthly.empty else []
+    payload = {
+        "unit": "Điện lực Thường Xuân",
+        "latest_actual_month": str(latest_month.date()),
+        "latest_actual_kwh": float(series_actual.loc[pd.to_datetime(series_actual.date).dt.to_period("M").dt.to_timestamp()==latest_month,"actual"].sum()),
+        "normalized_latest_kwh": float(series_norm.loc[pd.to_datetime(series_norm.date).dt.to_period("M").dt.to_timestamp()==latest_month,"normalized_actual"].sum()) if "normalized_actual" in series_norm.columns else None,
+        "backtest": backtest.to_dict("records"),
+        "weights": weights,
+        "forecasts": forecast_df.to_dict("records"),
+        "error_summary": err_summary_ai.to_dict("records") if not err_summary_ai.empty else [],
+        "error_latest": err_detail_ai[err_detail_ai.target_month==latest_month].to_dict("records") if not err_detail_ai.empty else [],
+        "weather": weather_payload,
+        "outages": outage_payload,
+        "customer_changes_top20": changes.to_dict("records"),
+        "top100_summary": {
+            "count": int(len(top100)),
+            "columns": list(top100.columns),
+        },
+        "data_note": "AI receives summary data only; raw customer workbook is not sent."
+    }
+
+    col_ai1,col_ai2,col_ai3=st.columns(3)
+    def run_ai(task, q=""):
+        if not api_key:
+            st.error("Chưa cấu hình OpenAI API key."); return
+        with st.spinner("ChatGPT đang phân tích..."):
+            try:
+                ans=ask_openai(api_key, ai_model, task, payload, q)
+                st.session_state["last_ai_answer"]=ans
+                st.session_state.model_state.setdefault("ai_history",[]).append({"time":datetime.now().isoformat(timespec="seconds"),"task":task,"model":ai_model,"answer":ans})
+                st.markdown(ans)
+            except Exception as e:
+                st.error(f"Lỗi gọi OpenAI API: {e}")
+    with col_ai1:
+        if st.button("🧠 Phân tích dự báo",use_container_width=True):
+            run_ai("Phân tích dự báo hiện tại, so sánh 5 nhánh mô hình, giải thích trọng số Ensemble và nêu các rủi ro chính.")
+    with col_ai2:
+        if st.button("🎯 Giải trình sai số",use_container_width=True):
+            run_ai("Phân tích sai số dự báo so với thực tế. Tách nguyên nhân do mô hình, thời tiết, mất điện, mùa vụ và biến động khách hàng; nêu phần nào định lượng được.")
+    with col_ai3:
+        if st.button("📄 Soạn báo cáo lãnh đạo",use_container_width=True):
+            run_ai("Soạn báo cáo ngắn trình lãnh đạo về kết quả dự báo, chất lượng mô hình, nguyên nhân biến động và đề xuất cập nhật kỳ tiếp theo.")
+
+    st.divider()
+    q=st.text_area("Hỏi AI về dữ liệu dự báo",placeholder="Ví dụ: Vì sao dự báo tháng 10 giảm? Mô hình nào đáng tin nhất? Top nguyên nhân sai số tháng 8 là gì?")
+    if st.button("💬 Hỏi ChatGPT",use_container_width=True):
+        run_ai("Trả lời câu hỏi của người dùng dựa trên dữ liệu EVN Forecast được cung cấp.",q)
+    if st.session_state.get("last_ai_answer"):
+        st.download_button("⬇️ Tải phân tích AI (.txt)",st.session_state["last_ai_answer"].encode("utf-8"),"EVN_Forecast_AI_Analysis.txt","text/plain")
+
+with t9:
     st.subheader("Model State")
     st.session_state.model_state["last_run"]={"time":datetime.now().isoformat(timespec="seconds"),"latest_month":str(pd.to_datetime(series_actual.date).max().date()),"weights":weights,"backtest":backtest.to_dict("records")}
     st.session_state.model_state["model_weights"]=weights
@@ -344,7 +430,7 @@ with t8:
     st.download_button("⬇️ Tải model_state.json",state_to_bytes(st.session_state.model_state),"model_state.json","application/json")
     st.json(st.session_state.model_state.get("last_run",{}))
 
-with t9:
+with t10:
     st.subheader("Xuất bộ kết quả")
     bio=io.BytesIO()
     with pd.ExcelWriter(bio,engine="openpyxl") as w:
@@ -358,4 +444,4 @@ with t9:
         err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
         if not err_detail.empty:err_detail.to_excel(w,sheet_name="Sai_so_chi_tiet",index=False)
         if not err_summary.empty:err_summary.to_excel(w,sheet_name="Tong_hop_sai_so",index=False)
-    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.4.1",bio.getvalue(),"EVN_Forecast_1.4.1_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5 AI",bio.getvalue(),"EVN_Forecast_1.5_AI_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
