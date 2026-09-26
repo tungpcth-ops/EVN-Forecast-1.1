@@ -15,7 +15,7 @@ from outage_engine import parse_outage_workbook, estimate_outage_losses, normali
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
 
-st.set_page_config(page_title="EVN Forecast 1.4 Multi-Model",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.4.1 Multi-Model",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -41,7 +41,7 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.4")
+st.sidebar.title("⚡ EVN Forecast 1.4.1")
 st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
@@ -54,6 +54,10 @@ combined=st.sidebar.file_uploader("File điện năng gộp 2025–2026 / file m
 f2025=st.sidebar.file_uploader("Hoặc file riêng năm 2025",type=["xlsx","xls"],key="f2025")
 f2026=st.sidebar.file_uploader("Hoặc file riêng năm 2026",type=["xlsx","xls"],key="f2026")
 history_file=st.sidebar.file_uploader("Lịch sử ĐTP tổng 2022–2024 (tùy chọn)",type=["xlsx","csv"],key="hist")
+
+st.sidebar.subheader("1B) Cập nhật tháng mới")
+new_month_file=st.sidebar.file_uploader("File điện năng có tháng mới",type=["xlsx","xls"],key="new_month")
+st.sidebar.caption("Dùng khi có T9, T10... mới. App sẽ ghép theo Mã KH + tháng và ưu tiên số liệu file mới nếu trùng.")
 
 st.sidebar.subheader("2) Mất điện / nguyên nhân sai số")
 try:
@@ -70,7 +74,7 @@ st.sidebar.subheader("4) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.4 Multi-Model – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.4.1 Multi-Model – Điện lực Thường Xuân")
 st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
@@ -103,6 +107,7 @@ try:
     if combined is not None: frames.append(parse_customer_workbook(combined))
     if f2025 is not None: frames.append(parse_customer_workbook(f2025,2025))
     if f2026 is not None: frames.append(parse_customer_workbook(f2026,2026))
+    if new_month_file is not None: frames.append(parse_customer_workbook(new_month_file))
 except Exception as e:st.error(f"Lỗi đọc dữ liệu KH: {e}")
 customer_long=pd.concat(frames,ignore_index=True).drop_duplicates(["customer_id","date"],keep="last") if frames else pd.DataFrame()
 monthly=aggregate_monthly(customer_long)
@@ -142,6 +147,49 @@ if not outage_rows.empty:
 series_norm=normalize_series_for_outages(series_actual,outage_monthly)
 model_series=series_norm[["date","normalized_actual"]].rename(columns={"normalized_actual":"actual"}) if use_normalized else series_actual.copy()
 
+# -------- forecast history & error comparison --------
+def _month_key(v):
+    return pd.to_datetime(v).to_period("M").to_timestamp()
+
+def record_forecasts_to_state(state, forecast_df, weights):
+    hist=list(state.get("forecast_history",[]))
+    now=datetime.now().isoformat(timespec="seconds")
+    existing={(str(x.get("target_month")), str(x.get("model")), str(x.get("run_month"))) for x in hist}
+    run_month=str(pd.Timestamp.today().to_period("M"))
+    for _,r in forecast_df.iterrows():
+        tm=str(pd.to_datetime(r["date"]).to_period("M"))
+        for c in [x for x in forecast_df.columns if x!="date"]:
+            v=r.get(c)
+            if pd.isna(v): continue
+            key=(tm,str(c),run_month)
+            if key in existing: continue
+            hist.append({"run_month":run_month,"created_at":now,"target_month":tm,"model":str(c),"forecast_kwh":float(v),"weight":float(weights.get(c,0)) if c!="Ensemble" else 1.0})
+            existing.add(key)
+    state["forecast_history"]=hist
+    return state
+
+def build_error_report(state, series_actual):
+    fh=pd.DataFrame(state.get("forecast_history",[]))
+    if fh.empty:return pd.DataFrame(),pd.DataFrame()
+    fh["target_month"]=pd.to_datetime(fh["target_month"],errors="coerce").dt.to_period("M").dt.to_timestamp()
+    act=series_actual[["date","actual"]].copy();act["date"]=pd.to_datetime(act.date).dt.to_period("M").dt.to_timestamp()
+    # If multiple runs forecast same target/model, keep the latest forecast created before actual was known; here latest stored snapshot is used.
+    if "created_at" in fh.columns:
+        fh=fh.sort_values("created_at").drop_duplicates(["target_month","model"],keep="last")
+    d=fh.merge(act,left_on="target_month",right_on="date",how="inner").drop(columns=["date"])
+    if d.empty:return d,pd.DataFrame()
+    d["sai_lech_kWh"]=d.actual-d.forecast_kwh
+    d["sai_lech_tuyet_doi_kWh"]=d.sai_lech_kWh.abs()
+    d["sai_so_pct"]=np.where(d.actual!=0,d.sai_lech_tuyet_doi_kWh/d.actual*100,np.nan)
+    d["bias_pct"]=np.where(d.actual!=0,d.sai_lech_kWh/d.actual*100,np.nan)
+    rows=[]
+    for m,g in d.groupby("model"):
+        a=g.actual.values.astype(float);p=g.forecast_kwh.values.astype(float)
+        err=a-p
+        rows.append({"Mô hình":m,"Số kỳ":len(g),"MAPE %":np.nanmean(np.abs(err/a)*100) if np.all(a!=0) else np.nan,"MAE kWh":np.nanmean(np.abs(err)),"RMSE kWh":float(np.sqrt(np.nanmean(err**2))),"Bias kWh":np.nanmean(err),"Bias %":np.nanmean(err/a*100) if np.all(a!=0) else np.nan})
+    sm=pd.DataFrame(rows).sort_values(["MAPE %","RMSE kWh"],na_position="last")
+    return d.sort_values(["target_month","model"],ascending=[False,True]),sm
+
 # -------- models --------
 backtest=backtest_five_models(model_series,customer_long,hist_weather,outage_monthly,max_origins=10)
 forecast_df,weights=forecast_all(model_series,customer_long,hist_weather,fut_weather,outage_monthly,None,horizon,backtest)
@@ -160,7 +208,7 @@ if best is not None and pd.notna(best.MAPE) and best.MAPE>1.5:
     st.markdown(f'<div class="note"><b>⚠️ MAPE kiểm định tốt nhất hiện {best.MAPE:.2f}%</b> – chưa đạt mục tiêu 1,5%. Hệ thống vẫn chọn trọng số theo back-test và hiển thị nguyên nhân để tiếp tục hiệu chỉnh.</div>',unsafe_allow_html=True)
 
 # -------- tabs --------
-t1,t2,t3,t4,t5,t6,t7,t8=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","💾 Model State","📤 Xuất dữ liệu"])
+t1,t2,t3,t4,t5,t6,t7,t8,t9=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","💾 Model State","📤 Xuất dữ liệu"])
 
 with t1:
     fig=go.Figure()
@@ -241,14 +289,62 @@ with t6:
     st.markdown("**Nguyên tắc:** không chọn mô hình theo cảm tính. Hệ thống back-test 5 nhánh, tính MAPE/MAE/RMSE, sau đó tăng trọng số cho mô hình có MAPE thấp hơn. Bottom-up và hồi quy đa biến giúp phản ánh biến động KH lớn, thời tiết, lịch và mất điện; các mô hình chuỗi giữ vai trò kiểm tra quy luật xu hướng/mùa vụ.")
 
 with t7:
+    st.subheader("So sánh dự báo và thực tế")
+    st.caption("Muốn có báo cáo sai số đúng theo thời điểm dự báo, hãy bấm 'Ghi nhận dự báo hiện tại' trước khi có số thực tế tháng đó. Khi upload file tháng mới, app tự ghép thực tế và tính sai số.")
+    cA,cB=st.columns([1,3])
+    with cA:
+        if st.button("📌 Ghi nhận dự báo hiện tại",use_container_width=True):
+            st.session_state.model_state=record_forecasts_to_state(st.session_state.model_state,forecast_df,weights)
+            save_state(st.session_state.model_state)
+            st.success("Đã lưu snapshot dự báo vào Model State")
+    err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
+    if err_detail.empty:
+        st.info("Chưa có cặp dự báo–thực tế trong Model State. Hãy ghi nhận dự báo, sau đó khi có tháng mới upload file tại mục '1B) Cập nhật tháng mới'.")
+    else:
+        st.subheader("Bảng sai số chi tiết theo tháng và mô hình")
+        show=err_detail.copy();show["target_month"]=pd.to_datetime(show.target_month).dt.strftime("%m/%Y")
+        cols=[c for c in ["target_month","model","forecast_kwh","actual","sai_lech_kWh","sai_lech_tuyet_doi_kWh","sai_so_pct","bias_pct","created_at"] if c in show.columns]
+        st.dataframe(show[cols].style.format({"forecast_kwh":"{:,.0f}","actual":"{:,.0f}","sai_lech_kWh":"{:,.0f}","sai_lech_tuyet_doi_kWh":"{:,.0f}","sai_so_pct":"{:.2f}%","bias_pct":"{:.2f}%"}),use_container_width=True,hide_index=True)
+        st.subheader("Xếp hạng chất lượng mô hình")
+        st.dataframe(err_summary.style.format({"MAPE %":"{:.2f}%","MAE kWh":"{:,.0f}","RMSE kWh":"{:,.0f}","Bias kWh":"{:,.0f}","Bias %":"{:.2f}%"}),use_container_width=True,hide_index=True)
+        if not err_summary.empty:
+            st.plotly_chart(px.bar(err_summary,x="MAPE %",y="Mô hình",orientation="h",title="MAPE thực tế theo mô hình"),use_container_width=True)
+        # latest actual month decomposition
+        lm=pd.to_datetime(series_actual.date).max().to_period("M").to_timestamp()
+        lmrows=err_detail[err_detail.target_month==lm]
+        if not lmrows.empty:
+            st.subheader(f"Chi tiết tháng {lm.strftime('%m/%Y')}")
+            ens=lmrows[lmrows.model=="Ensemble"]
+            if not ens.empty:
+                r=ens.iloc[-1]
+                c1,c2,c3,c4=st.columns(4)
+                with c1:kpi("Dự báo Ensemble",fmt(r.forecast_kwh)+" kWh")
+                with c2:kpi("Thực tế",fmt(r.actual)+" kWh")
+                with c3:kpi("Chênh lệch",fmt(r.sai_lech_kWh)+" kWh")
+                with c4:kpi("Sai số",f"{r.sai_so_pct:.2f}%")
+            # reason context
+            if not outage_monthly.empty:
+                z=outage_monthly[pd.to_datetime(outage_monthly.date).dt.to_period("M").dt.to_timestamp()==lm]
+                if not z.empty: st.write("**Ảnh hưởng mất điện tháng:**",z.to_dict("records"))
+            # customer deltas month-over-month
+            prev=lm-pd.DateOffset(months=1)
+            a=customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==lm].groupby(["customer_id","customer_name"],as_index=False).kwh.sum().rename(columns={"kwh":"kwh_thang"})
+            b=customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==prev].groupby(["customer_id","customer_name"],as_index=False).kwh.sum().rename(columns={"kwh":"kwh_truoc"})
+            ch=a.merge(b,on=["customer_id","customer_name"],how="outer").fillna(0);ch["chenh_kwh"]=ch.kwh_thang-ch.kwh_truoc
+            st.write("**Top KH làm thay đổi sản lượng so tháng trước:**")
+            st.dataframe(pd.concat([ch.nlargest(10,"chenh_kwh"),ch.nsmallest(10,"chenh_kwh")]).drop_duplicates().sort_values("chenh_kwh").style.format({"kwh_thang":"{:,.0f}","kwh_truoc":"{:,.0f}","chenh_kwh":"{:+,.0f}"}),use_container_width=True,hide_index=True)
+
+with t8:
     st.subheader("Model State")
     st.session_state.model_state["last_run"]={"time":datetime.now().isoformat(timespec="seconds"),"latest_month":str(pd.to_datetime(series_actual.date).max().date()),"weights":weights,"backtest":backtest.to_dict("records")}
+    st.session_state.model_state["model_weights"]=weights
+    st.session_state.model_state["backtest"]=backtest.to_dict("records")
     if st.button("💾 Lưu Model State"):
         save_state(st.session_state.model_state);st.success("Đã lưu")
     st.download_button("⬇️ Tải model_state.json",state_to_bytes(st.session_state.model_state),"model_state.json","application/json")
     st.json(st.session_state.model_state.get("last_run",{}))
 
-with t8:
+with t9:
     st.subheader("Xuất bộ kết quả")
     bio=io.BytesIO()
     with pd.ExcelWriter(bio,engine="openpyxl") as w:
@@ -259,4 +355,7 @@ with t8:
         inds.to_excel(w,sheet_name="Nganh_nghe",index=False)
         if not outage_monthly.empty:outage_monthly.to_excel(w,sheet_name="Mat_dien_thang",index=False)
         if not fut_weather.empty:fut_weather.to_excel(w,sheet_name="Thoi_tiet_du_bao",index=False)
-    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.4",bio.getvalue(),"EVN_Forecast_1.4_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
+        if not err_detail.empty:err_detail.to_excel(w,sheet_name="Sai_so_chi_tiet",index=False)
+        if not err_summary.empty:err_summary.to_excel(w,sheet_name="Tong_hop_sai_so",index=False)
+    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.4.1",bio.getvalue(),"EVN_Forecast_1.4.1_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

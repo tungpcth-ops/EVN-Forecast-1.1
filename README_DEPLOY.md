@@ -40,3 +40,10 @@ Upload toàn bộ file trong thư mục này lên repository GitHub đang dùng 
 Main file: `streamlit_app.py`
 
 Không đưa API key hoặc dữ liệu khách hàng thật vào repository public.
+
+## EVN Forecast 1.4.1 - cập nhật tháng mới & đối chiếu sai số
+- Mục `1B) Cập nhật tháng mới`: upload file Excel có thêm T9/T10/...; dữ liệu mới được ưu tiên nếu trùng Mã KH + tháng.
+- Tab `🎯 Đối chiếu sai số`: lưu snapshot dự báo trước khi có thực tế, sau đó tự ghép với thực tế tháng mới.
+- Báo cáo chi tiết: dự báo từng mô hình, thực tế, chênh kWh, sai số %, bias %, MAPE, MAE, RMSE và xếp hạng mô hình.
+- Excel xuất kết quả có thêm `Sai_so_chi_tiet` và `Tong_hop_sai_so`.
+- Model State lưu `forecast_history`, vì vậy nên tải `model_state.json` về sau mỗi lần chốt dự báo và khôi phục ở lần dùng tiếp theo.
