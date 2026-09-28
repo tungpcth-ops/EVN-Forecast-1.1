@@ -294,7 +294,34 @@ def adaptive_weights(backtest):
     e=np.maximum(b.MAPE.values,0.75); raw=1/(e**2); raw=raw/raw.sum()
     return dict(zip(b.model,raw))
 
-def forecast_all(series, customer_long, hist_weather_monthly, future_weather_monthly, outage_monthly=None, future_outage=None, horizon=3, backtest=None):
+def _fixed_adjustment_for_target(customer_long, fixed_forecasts, target_date, horizon_index):
+    """Return (modelled contribution, agreed fixed contribution, count) for hard-forecast customers.
+
+    The modelled contribution is estimated by Bottom-up from those customers only. It is
+    replaced by the agreed value in every forecast branch so the customer is not double-counted.
+    """
+    if fixed_forecasts is None or getattr(fixed_forecasts, 'empty', True):
+        return 0.0, 0.0, 0
+    ff=fixed_forecasts.copy()
+    ff['forecast_month']=pd.to_datetime(ff['forecast_month'],errors='coerce').dt.to_period('M').dt.to_timestamp()
+    td=pd.Timestamp(target_date).to_period('M').to_timestamp()
+    z=ff[ff.forecast_month==td].copy()
+    if z.empty:return 0.0,0.0,0
+    z['fixed_kwh']=pd.to_numeric(z['fixed_kwh'],errors='coerce').fillna(0).clip(lower=0)
+    fixed_total=float(z.groupby('customer_id').fixed_kwh.last().sum())
+    ids=set(z.customer_id.astype(str))
+    if customer_long is None or customer_long.empty or not ids:
+        return 0.0,fixed_total,len(ids)
+    sub=customer_long[customer_long.customer_id.astype(str).isin(ids)].copy()
+    if sub.empty:return 0.0,fixed_total,len(ids)
+    try:
+        arr=forecast_bottom_up(sub,horizon=max(1,int(horizon_index)))
+        modelled=float(arr[int(horizon_index)-1]) if len(arr)>=int(horizon_index) and np.isfinite(arr[int(horizon_index)-1]) else 0.0
+    except Exception:
+        modelled=0.0
+    return max(0.0,modelled),fixed_total,len(ids)
+
+def forecast_all(series, customer_long, hist_weather_monthly, future_weather_monthly, outage_monthly=None, future_outage=None, horizon=3, backtest=None, fixed_forecasts=None):
     preds={}
     for n,fn in [
         ("Thống kê & tăng trưởng",lambda:forecast_stat_trend(series,horizon)),
@@ -311,9 +338,12 @@ def forecast_all(series, customer_long, hist_weather_monthly, future_weather_mon
     rows=[]
     for j,d in enumerate(dates):
         row={"date":d}
+        modelled_fixed,fixed_total,_=_fixed_adjustment_for_target(customer_long,fixed_forecasts,d,j+1)
         valid=[]
         for m,a in preds.items():
-            row[m]=float(a[j]) if j<len(a) and np.isfinite(a[j]) else np.nan
+            base=float(a[j]) if j<len(a) and np.isfinite(a[j]) else np.nan
+            # KH đã làm việc/chốt sản lượng: bỏ phần mô hình ước cho các KH này và thay bằng số chốt.
+            row[m]=max(0.0,base-modelled_fixed+fixed_total) if np.isfinite(base) else np.nan
             if np.isfinite(row[m]) and m in w:valid.append((m,row[m]))
         if valid:
             sw=sum(w[m] for m,_ in valid); row["Ensemble"]=sum(v*w[m] for m,v in valid)/sw

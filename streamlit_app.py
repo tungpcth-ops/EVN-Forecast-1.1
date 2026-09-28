@@ -16,12 +16,14 @@ from outage_engine import (parse_outage_workbook, estimate_outage_losses, normal
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
 from prompt_engine import build_chatgpt_prompt
+from fixed_customer_engine import parse_fixed_forecast_workbook, normalize_fixed_forecasts, enrich_with_customer_names, fixed_summary_for_month
 from data_store import (load_customer_history, save_customer_history, merge_customer_history,
                         load_total_history, save_total_history, load_meta, clear_store,
                         backup_bundle_bytes, restore_bundle, load_outage_history, save_outage_history,
-                        merge_outage_history, delete_outage_records)
+                        merge_outage_history, delete_outage_records, load_fixed_forecasts, save_fixed_forecasts,
+                        merge_fixed_forecasts, delete_fixed_forecast_records)
 
-st.set_page_config(page_title="EVN Forecast 1.5.3",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5.4",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -47,7 +49,7 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.5.3")
+st.sidebar.title("⚡ EVN Forecast 1.5.4")
 st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • Trợ lý ChatGPT không API")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
@@ -124,7 +126,30 @@ with st.sidebar.expander("Sao lưu / Khôi phục dữ liệu"):
             st.rerun()
         except Exception as e: st.error(str(e))
 
-st.sidebar.subheader("2) Mất điện / nguyên nhân sai số")
+st.sidebar.subheader("2) 📌 KH dự báo cứng")
+try:
+    tpl_fixed=open("Mau_KH_du_bao_cung.xlsx","rb").read()
+    st.sidebar.download_button("⬇️ Mẫu KH dự báo cứng",tpl_fixed,"Mau_KH_du_bao_cung.xlsx",use_container_width=True)
+except Exception:
+    pass
+fixed_file=st.sidebar.file_uploader("Upload KH đã làm việc/chốt điện năng",type=["xlsx"],key="fixed_customer_file")
+st.sidebar.caption("KH có số chốt sẽ KHÔNG dùng điện năng mô hình để dự báo tháng đó. App thay phần mô hình ước bằng đúng sản lượng đã chốt và tránh tính trùng.")
+if fixed_file is not None and st.sidebar.button("💾 Lưu/Cập nhật KH dự báo cứng",use_container_width=True):
+    try:
+        fx=parse_fixed_forecast_workbook(fixed_file)
+        fx=enrich_with_customer_names(fx,load_customer_history())
+        saved=merge_fixed_forecasts(load_fixed_forecasts(),fx)
+        save_fixed_forecasts(saved)
+        st.session_state.model_state.setdefault("events",[]).append({
+            "time":datetime.now().isoformat(timespec="seconds"),"type":"fixed_customer_update",
+            "rows_received":int(len(fx)),"rows_stored":int(len(saved))})
+        save_state(st.session_state.model_state)
+        st.sidebar.success(f"Đã lưu {len(fx)} dòng KH dự báo cứng. Tổng đang lưu: {len(saved)} dòng.")
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Không lưu được KH dự báo cứng: {e}")
+
+st.sidebar.subheader("3) Mất điện / nguyên nhân sai số")
 try:
     tpl=open("Mau_Nhat_ky_mat_dien.xlsx","rb").read();st.sidebar.download_button("⬇️ Mẫu nhật ký mất điện",tpl,"Mau_Nhat_ky_mat_dien.xlsx",use_container_width=True)
 except:pass
@@ -148,16 +173,16 @@ if outage_file is not None and st.sidebar.button("💾 Lưu/Cập nhật nhật 
         st.sidebar.error(f"Không lưu được nhật ký mất điện: {e}")
 st.sidebar.caption("Có thể nhập nhanh Ngày, giờ bắt đầu/kết thúc, Mã KH, nguyên nhân sai số trong phần ⚡ bên dưới.")
 
-st.sidebar.subheader("3) Dự báo")
+st.sidebar.subheader("4) Dự báo")
 horizon=st.sidebar.selectbox("Số tháng dự báo",[1,3,6,12],index=1)
 use_normalized=st.sidebar.checkbox("Chuẩn hóa lịch sử do mất điện",value=True)
 
-st.sidebar.subheader("4) Thời tiết")
+st.sidebar.subheader("5) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.5.3 – Điện lực Thường Xuân")
-st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
+st.title("⚡ EVN Forecast 1.5.4 – Điện lực Thường Xuân")
+st.caption("5 nhánh đối chiếu + KH dự báo cứng: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng • thay số chốt KH đã làm việc")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
     st.caption("Mỗi lần lưu sẽ ghi vết vào nhật ký. Không cần nhập tỷ lệ ảnh hưởng; app tự tính theo tỷ trọng sản lượng của các KH bị ảnh hưởng.")
@@ -203,6 +228,7 @@ if save_manual:
 # -------- data --------
 # Dữ liệu khách hàng được đọc từ kho đã lưu. File tháng mới chỉ dùng để cập nhật kho qua nút ở sidebar.
 customer_long=load_customer_history()
+fixed_forecasts=enrich_with_customer_names(load_fixed_forecasts(),customer_long)
 monthly=aggregate_monthly(customer_long)
 history=load_total_history()
 series_actual=merge_total_history(history if not history.empty else None,monthly)
@@ -283,7 +309,7 @@ def build_error_report(state, series_actual):
 
 # -------- models --------
 backtest=backtest_five_models(model_series,customer_long,hist_weather,outage_monthly,max_origins=10)
-forecast_df,weights=forecast_all(model_series,customer_long,hist_weather,fut_weather,outage_monthly,None,horizon,backtest)
+forecast_df,weights=forecast_all(model_series,customer_long,hist_weather,fut_weather,outage_monthly,None,horizon,backtest,fixed_forecasts=fixed_forecasts)
 top100=top100_influence(customer_long,100)
 
 # Tự lưu snapshot dự báo theo tháng dữ liệu mới nhất. Khi tháng sau có thực tế, app tự đối chiếu sai số.
@@ -296,18 +322,21 @@ if _after_count>_before_count:
 
 latest=series_norm.iloc[-1]
 best=backtest.iloc[0] if not backtest.empty else None
-c1,c2,c3,c4,c5=st.columns(5)
+next_month=(pd.to_datetime(series_actual.date).max().to_period("M")+1).to_timestamp()
+fixed_next=fixed_summary_for_month(fixed_forecasts,next_month)
+c1,c2,c3,c4,c5,c6=st.columns(6)
 with c1:kpi("Tháng mới nhất",pd.to_datetime(latest.date).strftime("%m/%Y"))
 with c2:kpi("Thực tế",fmt(latest.actual)+" kWh")
 with c3:kpi("Ước mất do mất điện",fmt(latest.get("outage_lost_kwh",0))+" kWh")
-with c4:kpi("Dự báo tháng kế",fmt(forecast_df.Ensemble.iloc[0])+" kWh" if not forecast_df.empty else "-")
-with c5:kpi("MAPE tốt nhất",f"{best.MAPE:.2f}%" if best is not None and pd.notna(best.MAPE) else "-",str(best.model) if best is not None else "")
+with c4:kpi("KH cứng tháng kế",fmt(fixed_next.get("fixed_kwh",0))+" kWh",f"{fixed_next.get('customer_count',0)} KH")
+with c5:kpi("Dự báo tháng kế",fmt(forecast_df.Ensemble.iloc[0])+" kWh" if not forecast_df.empty else "-")
+with c6:kpi("MAPE tốt nhất",f"{best.MAPE:.2f}%" if best is not None and pd.notna(best.MAPE) else "-",str(best.model) if best is not None else "")
 
 if best is not None and pd.notna(best.MAPE) and best.MAPE>1.5:
     st.markdown(f'<div class="note"><b>⚠️ MAPE kiểm định tốt nhất hiện {best.MAPE:.2f}%</b> – chưa đạt mục tiêu 1,5%. Hệ thống vẫn chọn trọng số theo back-test và hiển thị nguyên nhân để tiếp tục hiệu chỉnh.</div>',unsafe_allow_html=True)
 
 # -------- tabs --------
-t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 Trợ lý ChatGPT","💾 Model State","📤 Xuất dữ liệu"])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 Trợ lý ChatGPT","💾 Model State","📤 Xuất dữ liệu","📌 KH dự báo cứng"])
 
 with t1:
     fig=go.Figure()
@@ -491,6 +520,7 @@ with t8:
         "error_latest": err_detail_ai[err_detail_ai.target_month==latest_month].to_dict("records") if not err_detail_ai.empty else [],
         "weather": weather_payload,
         "outages": outage_payload,
+        "fixed_customer_forecasts": fixed_forecasts.to_dict("records") if not fixed_forecasts.empty else [],
         "customer_changes_top20": changes.to_dict("records"),
         "top100_summary": {"count": int(len(top100)), "columns": list(top100.columns)},
         "data_note": "Prompt chỉ chứa dữ liệu tổng hợp; file khách hàng gốc không được đưa vào prompt."
@@ -552,7 +582,104 @@ with t10:
         inds.to_excel(w,sheet_name="Nganh_nghe",index=False)
         if not outage_monthly.empty:outage_monthly.to_excel(w,sheet_name="Mat_dien_thang",index=False)
         if not fut_weather.empty:fut_weather.to_excel(w,sheet_name="Thoi_tiet_du_bao",index=False)
+        if not fixed_forecasts.empty:fixed_forecasts.to_excel(w,sheet_name="KH_du_bao_cung",index=False)
         err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
         if not err_detail.empty:err_detail.to_excel(w,sheet_name="Sai_so_chi_tiet",index=False)
         if not err_summary.empty:err_summary.to_excel(w,sheet_name="Tong_hop_sai_so",index=False)
-    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5.1",bio.getvalue(),"EVN_Forecast_1.5.2_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5.4",bio.getvalue(),"EVN_Forecast_1.5.4_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+with t11:
+    st.subheader("📌 Khách hàng dự báo điện năng cứng")
+    st.markdown('<div class="ok"><b>Nguyên tắc:</b> KH đã làm việc và chốt sản lượng tháng sẽ không dùng điện năng mô hình để dự báo tháng đó. EVN Forecast tự bỏ phần mô hình ước cho KH này và thay bằng đúng số kWh đã chốt, tránh tính trùng.</div>',unsafe_allow_html=True)
+
+    next_default=(pd.to_datetime(series_actual.date).max().to_period("M")+1).to_timestamp().date()
+    manual_fixed_default=pd.DataFrame([{
+        "Tháng dự báo":next_default,
+        "Mã KH":"",
+        "Tên KH":"",
+        "Điện năng chốt (kWh)":0,
+        "Căn cứ/Biên bản":"",
+        "Ghi chú":""
+    }])
+    mf=st.data_editor(manual_fixed_default,num_rows="dynamic",use_container_width=True,key="manual_fixed_customers")
+    if st.button("💾 Lưu/Cập nhật KH dự báo cứng nhập trực tiếp",use_container_width=True,key="save_manual_fixed"):
+        try:
+            rows=[]
+            for _,r in mf.iterrows():
+                d=pd.to_datetime(r.get("Tháng dự báo"),errors="coerce")
+                cid=str(r.get("Mã KH","") or "").strip()
+                val=pd.to_numeric(pd.Series([r.get("Điện năng chốt (kWh)")]),errors="coerce").iloc[0]
+                if pd.isna(d) or not cid or pd.isna(val) or float(val)<0:
+                    continue
+                rows.append({
+                    "forecast_month":d.to_period("M").to_timestamp(),
+                    "customer_id":cid,
+                    "customer_name":str(r.get("Tên KH","") or "").strip(),
+                    "fixed_kwh":float(val),
+                    "basis":str(r.get("Căn cứ/Biên bản","") or "").strip(),
+                    "note":str(r.get("Ghi chú","") or "").strip(),
+                    "source":"Nhập trực tiếp",
+                    "saved_at":datetime.now().isoformat(timespec="seconds"),
+                })
+            fx=normalize_fixed_forecasts(pd.DataFrame(rows))
+            fx=enrich_with_customer_names(fx,customer_long)
+            if fx.empty:
+                st.warning("Chưa có dòng hợp lệ để lưu.")
+            else:
+                saved=merge_fixed_forecasts(load_fixed_forecasts(),fx)
+                save_fixed_forecasts(saved)
+                st.session_state.model_state.setdefault("events",[]).append({
+                    "time":datetime.now().isoformat(timespec="seconds"),"type":"fixed_customer_manual_update","rows_received":int(len(fx))})
+                save_state(st.session_state.model_state)
+                st.success(f"Đã lưu {len(fx)} dòng dự báo cứng.")
+                st.rerun()
+        except Exception as e:
+            st.error(f"Không lưu được KH dự báo cứng: {e}")
+
+    st.divider()
+    st.subheader("Danh sách đã lưu")
+    fxshow=enrich_with_customer_names(load_fixed_forecasts(),customer_long)
+    if fxshow.empty:
+        st.info("Chưa có KH dự báo cứng. Có thể nhập trực tiếp hoặc Upload file mẫu ở thanh bên.")
+    else:
+        latest_d=pd.to_datetime(customer_long.date).max().to_period("M").to_timestamp()
+        prev_d=latest_d-pd.DateOffset(months=1)
+        latest_map=(customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==latest_d]
+                    .groupby('customer_id').kwh.sum().to_dict())
+        prev_map=(customer_long[pd.to_datetime(customer_long.date).dt.to_period("M").dt.to_timestamp()==prev_d]
+                  .groupby('customer_id').kwh.sum().to_dict())
+        fxshow=fxshow.copy()
+        fxshow['Thực tế tháng mới nhất (kWh)']=fxshow.customer_id.map(latest_map).fillna(0)
+        fxshow['Thực tế tháng trước (kWh)']=fxshow.customer_id.map(prev_map).fillna(0)
+        fxshow['Chênh số chốt - T.tháng mới nhất']=fxshow.fixed_kwh-fxshow['Thực tế tháng mới nhất (kWh)']
+        fxshow.insert(0,'Xóa',False)
+        edited=st.data_editor(
+            fxshow,
+            use_container_width=True,
+            hide_index=True,
+            disabled=[c for c in fxshow.columns if c!='Xóa'],
+            key='fixed_customer_saved_editor'
+        )
+        c1,c2,c3=st.columns(3)
+        with c1:
+            if st.button("🗑️ Xóa dòng đã chọn",use_container_width=True,key="delete_fixed_rows"):
+                ids=edited.loc[edited['Xóa']==True,'record_id'].astype(str).tolist()
+                if not ids:
+                    st.warning("Chưa chọn dòng cần xóa.")
+                else:
+                    delete_fixed_forecast_records(ids)
+                    st.session_state.model_state.setdefault("events",[]).append({
+                        "time":datetime.now().isoformat(timespec="seconds"),"type":"fixed_customer_delete","count":len(ids)})
+                    save_state(st.session_state.model_state)
+                    st.success(f"Đã xóa {len(ids)} dòng.")
+                    st.rerun()
+        with c2:
+            st.metric("Số KH/tháng đã chốt",int(fxshow[['forecast_month','customer_id']].drop_duplicates().shape[0]))
+        with c3:
+            future_fx=fxshow[pd.to_datetime(fxshow.forecast_month)>=next_month]
+            st.metric("Tổng kWh cứng kỳ tương lai",f"{future_fx.fixed_kwh.sum():,.0f}".replace(',','.'))
+
+        st.caption("Nếu cần sửa số đã nhập, có thể nhập lại đúng Tháng + Mã KH; bản mới sẽ thay bản cũ. Hoặc chọn Xóa rồi nhập lại.")
+        bym=(fxshow.groupby('forecast_month',as_index=False).agg(so_kh=('customer_id','nunique'),dien_nang_chot_kwh=('fixed_kwh','sum')))
+        bym['forecast_month']=pd.to_datetime(bym.forecast_month).dt.strftime('%m/%Y')
+        st.dataframe(bym.style.format({'dien_nang_chot_kwh':'{:,.0f}'}),use_container_width=True,hide_index=True)

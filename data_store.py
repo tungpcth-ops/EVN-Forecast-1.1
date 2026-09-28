@@ -13,6 +13,7 @@ TOTAL_HISTORY_PATH = STORE_DIR / 'total_history.pkl.gz'
 META_PATH = STORE_DIR / 'data_meta.json'
 STATE_PATH = Path('model_state.json')
 OUTAGE_HISTORY_PATH = STORE_DIR / 'outage_history.pkl.gz'
+FIXED_FORECAST_PATH = STORE_DIR / 'fixed_customer_forecasts.pkl.gz'
 
 
 def _ensure_dir():
@@ -122,6 +123,43 @@ def delete_outage_records(record_ids) -> pd.DataFrame:
     save_outage_history(df)
     return df
 
+
+def load_fixed_forecasts() -> pd.DataFrame:
+    if not FIXED_FORECAST_PATH.exists():
+        return pd.DataFrame()
+    try:
+        return pd.read_pickle(FIXED_FORECAST_PATH, compression='gzip')
+    except Exception:
+        return pd.DataFrame()
+
+
+def save_fixed_forecasts(df: pd.DataFrame) -> None:
+    _ensure_dir()
+    if df is None:
+        df = pd.DataFrame()
+    df.to_pickle(FIXED_FORECAST_PATH, compression='gzip')
+
+
+def merge_fixed_forecasts(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    from fixed_customer_engine import normalize_fixed_forecasts
+    if old is None or old.empty:
+        out = new.copy() if new is not None else pd.DataFrame()
+    elif new is None or new.empty:
+        out = old.copy()
+    else:
+        out = pd.concat([old, new], ignore_index=True)
+    return normalize_fixed_forecasts(out)
+
+
+def delete_fixed_forecast_records(record_ids) -> pd.DataFrame:
+    df = load_fixed_forecasts()
+    if df.empty or 'record_id' not in df.columns:
+        return df
+    ids = {str(x) for x in record_ids}
+    df = df[~df['record_id'].astype(str).isin(ids)].reset_index(drop=True)
+    save_fixed_forecasts(df)
+    return df
+
 def load_meta() -> dict:
     if not META_PATH.exists():
         return {'created_at': None, 'updated_at': None}
@@ -147,7 +185,7 @@ def clear_store() -> None:
 def backup_bundle_bytes() -> bytes:
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        for p in [CUSTOMERS_PATH, TOTAL_HISTORY_PATH, OUTAGE_HISTORY_PATH, META_PATH, STATE_PATH]:
+        for p in [CUSTOMERS_PATH, TOTAL_HISTORY_PATH, OUTAGE_HISTORY_PATH, FIXED_FORECAST_PATH, META_PATH, STATE_PATH]:
             if p.exists():
                 z.write(p, arcname=p.name if p == STATE_PATH else f'data_store/{p.name}')
     return bio.getvalue()
@@ -160,6 +198,7 @@ def restore_bundle(raw: bytes) -> dict:
             'data_store/customer_history.pkl.gz': CUSTOMERS_PATH,
             'data_store/total_history.pkl.gz': TOTAL_HISTORY_PATH,
             'data_store/outage_history.pkl.gz': OUTAGE_HISTORY_PATH,
+            'data_store/fixed_customer_forecasts.pkl.gz': FIXED_FORECAST_PATH,
             'data_store/data_meta.json': META_PATH,
             'model_state.json': STATE_PATH,
         }

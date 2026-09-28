@@ -1,23 +1,37 @@
-# EVN Forecast 1.5.3 Web – Lưu vết nhật ký mất điện
+# EVN Forecast 1.5.4 Web – KH dự báo cứng
 
-## Điểm mới
-- Nhật ký mất điện được lưu vào kho dữ liệu cùng lịch sử khách hàng.
-- Mỗi lần Upload hoặc nhập nhanh đều có nút Lưu/Cập nhật và ghi sự kiện vào Model State.
-- Có thể chọn từng dòng sai và bấm Xóa; thao tác xóa cũng được lưu vết.
-- Gói Sao lưu/Khôi phục dữ liệu đã bao gồm `outage_history.pkl.gz`.
-- `TY_LE_PHU_TAI_ANH_HUONG` không cần nhập tay.
+## Điểm mới 1.5.4
 
-### Công thức tự tính tỷ lệ phụ tải ảnh hưởng
-`Tỷ lệ ảnh hưởng = Tổng kWh tháng của các khách hàng bị ảnh hưởng / Tổng kWh toàn đơn vị cùng tháng × 100%`
+Bổ sung **Khách hàng dự báo điện năng cứng** cho các KH đã làm việc và thống nhất sản lượng tháng.
 
-Nếu tháng sự cố chưa có dữ liệu thực tế, app dùng sản lượng tháng gần nhất trước sự cố để ước tính.
+### Nguyên tắc tính
+- Với KH đã có số chốt trong tháng mục tiêu, EVN Forecast **không dùng giá trị mô hình** của KH đó.
+- Hệ thống ước phần đóng góp mà mô hình đang gán cho nhóm KH cứng, **loại phần đó khỏi từng nhánh mô hình**, rồi **cộng đúng sản lượng đã chốt**.
+- Áp dụng cho cả 5 nhánh và Adaptive Ensemble để tránh tính trùng.
+- Back-test lịch sử vẫn dùng dữ liệu thực tế lịch sử; số chốt chỉ tác động vào tháng được khai báo.
 
-## Cách cập nhật website
-1. Giải nén ZIP.
-2. GitHub repository EVN Forecast hiện tại → Add file → Upload files.
-3. Upload toàn bộ file bên trong thư mục.
-4. Commit vào `main`.
-5. Streamlit tự redeploy.
+### Cách nhập
+Có 2 cách:
+1. Thanh bên → **2) 📌 KH dự báo cứng** → tải `Mau_KH_du_bao_cung.xlsx`, điền và upload.
+2. Tab **📌 KH dự báo cứng** → nhập trực tiếp từng dòng.
 
-## Lưu ý Streamlit Community Cloud
-Ổ đĩa cục bộ có thể bị reset khi redeploy. Sau mỗi kỳ cập nhật nên tải `EVN_Forecast_Data_Backup.zip`; file backup đã chứa cả lịch sử khách hàng, tổng điện thương phẩm, nhật ký mất điện và Model State.
+Các trường:
+- `THANG_DU_BAO`
+- `MA_KHANG`
+- `TEN_KHANG` (có thể để trống, app tự dò)
+- `DIEN_NANG_CHOT_KWH`
+- `CAN_CU`
+- `GHI_CHU`
+
+Nếu nhập lại cùng **Tháng + Mã KH**, bản mới nhất thay bản cũ. Có thể chọn dòng và xóa khi nhập sai.
+
+## Dữ liệu bền vững
+Kho dữ liệu/backup gồm:
+- lịch sử điện năng KH
+- lịch sử tổng
+- nhật ký mất điện
+- **KH dự báo cứng**
+- Model State
+
+## Deploy
+Upload toàn bộ file vào repository Streamlit hiện tại và Commit vào `main`. Streamlit tự redeploy.
