@@ -1,34 +1,22 @@
-# EVN Forecast 1.5.1 – Trợ lý ChatGPT không cần API key
+# EVN Forecast 1.5.2 – Dữ liệu nền nạp 1 lần
 
-Phiên bản 1.5.1 giữ nguyên toàn bộ EVN Forecast Multi-Model và thay phần gọi OpenAI API bằng **Trợ lý ChatGPT tạo prompt**.
+## Quy trình vận hành hàng tháng
 
-## Điểm mới
-- Không cần `OPENAI_API_KEY`.
-- Không gọi OpenAI API, không phát sinh chi phí API.
-- Tab **🤖 Trợ lý ChatGPT** tạo prompt sẵn cho 3 tình huống:
-  1. Phân tích dự báo và so sánh 5 nhánh mô hình.
-  2. Giải trình sai số dự báo – thực tế.
-  3. Soạn báo cáo lãnh đạo.
-- Có ô câu hỏi tùy chỉnh.
-- Prompt tự mang theo dữ liệu tổng hợp: back-test, MAPE/MAE/RMSE, trọng số Ensemble, forecast, sai số, thời tiết, mất điện và Top biến động khách hàng.
-- Mặc định ẩn tên khách hàng; chỉ đưa tên Top KH vào prompt khi người dùng chủ động bật.
-- Có khung `st.code` để sao chép nhanh và nút tải prompt `.txt`.
+1. **Lần đầu**: mở mục `📚 Dữ liệu nền` và nạp file gộp 2025–2026 (hoặc file riêng 2025 + 2026), sau đó bấm **💾 Lưu dữ liệu nền**.
+2. App lưu lịch sử khách hàng vào `data_store/customer_history.pkl.gz` và Model State vào `model_state.json`.
+3. **Các tháng sau**: chỉ tải file tháng mới tại `➕ Cập nhật tháng mới` rồi bấm **➕ Cập nhật vào lịch sử**.
+4. App ghép theo `Mã KH + tháng`, ưu tiên số liệu file mới nếu trùng, sau đó tự chạy lại 5 mô hình.
+5. App tự lưu snapshot dự báo theo tháng dữ liệu gần nhất. Khi có số thực tế tháng sau, tab `🎯 Đối chiếu sai số` tự tính sai số dự báo–thực tế, MAPE/MAE/RMSE/Bias và xếp hạng lại mô hình.
+6. Adaptive Ensemble dùng kết quả back-test mới để cập nhật trọng số cho kỳ tiếp theo.
 
-## Quy trình sử dụng
-1. Nạp/cập nhật dữ liệu tháng mới và chạy EVN Forecast.
-2. Mở tab **🤖 Trợ lý ChatGPT**.
-3. Chọn loại prompt cần tạo.
-4. Bấm biểu tượng sao chép trên khung prompt hoặc tải file `.txt`.
-5. Dán prompt vào cuộc trò chuyện ChatGPT đang sử dụng.
+## Sao lưu dữ liệu
 
-Không cần vào `Streamlit > Manage app > Settings > Secrets` và không cần cấu hình API key.
+Trong sidebar có `Sao lưu / Khôi phục dữ liệu`:
+- **⬇️ Tải gói sao lưu dữ liệu**: chứa dữ liệu khách hàng đã ghép, lịch sử tổng, metadata và Model State.
+- **♻️ Khôi phục dữ liệu**: dùng file backup `.zip` nếu Streamlit bị reset.
 
-## Cập nhật web hiện tại
-1. Giải nén ZIP.
-2. GitHub repo hiện tại > **Add file > Upload files**.
-3. Kéo toàn bộ file bên trong lên.
-4. Commit vào nhánh `main`.
-5. Streamlit tự redeploy.
+> Lưu ý: Streamlit Community Cloud không cam kết ổ đĩa cục bộ tồn tại vĩnh viễn sau restart/redeploy. Vì vậy để đạt đúng mục tiêu “file nền chỉ nạp một lần” trong vận hành bình thường, app lưu local; đồng thời nên tải gói backup sau mỗi lần cập nhật tháng mới. Nếu cần lưu vĩnh viễn hoàn toàn tự động, bước tiếp theo nên dùng Supabase/PostgreSQL hoặc Google Drive làm kho dữ liệu ngoài.
 
-## Khuyến nghị GitHub
-Không upload thư mục `__pycache__`, file `.pyc`, API key, hoặc file dữ liệu khách hàng vào repository public.
+## Cập nhật web
+
+Upload toàn bộ file của bản này lên repository GitHub hiện tại và Commit vào `main`. Streamlit sẽ redeploy tự động.

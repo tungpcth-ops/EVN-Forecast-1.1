@@ -15,8 +15,11 @@ from outage_engine import parse_outage_workbook, estimate_outage_losses, normali
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
 from prompt_engine import build_chatgpt_prompt
+from data_store import (load_customer_history, save_customer_history, merge_customer_history,
+                        load_total_history, save_total_history, load_meta, clear_store,
+                        backup_bundle_bytes, restore_bundle)
 
-st.set_page_config(page_title="EVN Forecast 1.5.1",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5.2",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -42,7 +45,7 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.5.1")
+st.sidebar.title("⚡ EVN Forecast 1.5.2")
 st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • Trợ lý ChatGPT không API")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
@@ -50,15 +53,74 @@ if state_upload:
         st.session_state.model_state=merge_uploaded_state(state_upload.getvalue());st.sidebar.success("Đã khôi phục Model State")
     except Exception as e:st.sidebar.error(str(e))
 
-st.sidebar.subheader("1) Dữ liệu khách hàng")
-combined=st.sidebar.file_uploader("File điện năng gộp 2025–2026 / file mới nhất",type=["xlsx","xls"],key="combined")
-f2025=st.sidebar.file_uploader("Hoặc file riêng năm 2025",type=["xlsx","xls"],key="f2025")
-f2026=st.sidebar.file_uploader("Hoặc file riêng năm 2026",type=["xlsx","xls"],key="f2026")
-history_file=st.sidebar.file_uploader("Lịch sử ĐTP tổng 2022–2024 (tùy chọn)",type=["xlsx","csv"],key="hist")
+st.sidebar.subheader("1) 📚 Dữ liệu nền")
+stored_meta=load_meta()
+stored_customer=load_customer_history()
+has_store=not stored_customer.empty
+if has_store:
+    latest_store=pd.to_datetime(stored_customer["date"]).max().strftime("%m/%Y")
+    first_store=pd.to_datetime(stored_customer["date"]).min().strftime("%m/%Y")
+    st.sidebar.success(f"Đã lưu dữ liệu nền {first_store} → {latest_store} • {stored_customer.customer_id.nunique():,} KH")
+else:
+    st.sidebar.warning("Chưa có dữ liệu nền. Chỉ cần nạp file gộp 2025–2026 một lần.")
 
-st.sidebar.subheader("1B) Cập nhật tháng mới")
-new_month_file=st.sidebar.file_uploader("File điện năng có tháng mới",type=["xlsx","xls"],key="new_month")
-st.sidebar.caption("Dùng khi có T9, T10... mới. App sẽ ghép theo Mã KH + tháng và ưu tiên số liệu file mới nếu trùng.")
+with st.sidebar.expander("Nạp/Thay dữ liệu nền", expanded=not has_store):
+    combined=st.file_uploader("File điện năng gộp 2025–2026 (nạp 1 lần)",type=["xlsx","xls"],key="combined")
+    f2025=st.file_uploader("Hoặc file riêng năm 2025",type=["xlsx","xls"],key="f2025")
+    f2026=st.file_uploader("Hoặc file riêng năm 2026",type=["xlsx","xls"],key="f2026")
+    history_file=st.file_uploader("Lịch sử ĐTP tổng 2022–2024 (tùy chọn)",type=["xlsx","csv"],key="hist")
+    if st.button("💾 Lưu dữ liệu nền",use_container_width=True):
+        init_frames=[]
+        try:
+            if combined is not None: init_frames.append(parse_customer_workbook(combined))
+            if f2025 is not None: init_frames.append(parse_customer_workbook(f2025,2025))
+            if f2026 is not None: init_frames.append(parse_customer_workbook(f2026,2026))
+            if init_frames:
+                base=pd.concat(init_frames,ignore_index=True).drop_duplicates(["customer_id","date"],keep="last")
+                save_customer_history(base)
+                if history_file is not None:
+                    h=pd.read_csv(history_file) if history_file.name.lower().endswith(".csv") else pd.read_excel(history_file)
+                    save_total_history(h)
+                st.success("Đã lưu dữ liệu nền. Từ tháng sau chỉ cần mục Cập nhật tháng mới.")
+                st.rerun()
+            else:
+                st.warning("Hãy chọn ít nhất một file dữ liệu nền.")
+        except Exception as e: st.error(f"Không lưu được dữ liệu nền: {e}")
+
+st.sidebar.subheader("1B) ➕ Cập nhật tháng mới")
+new_month_file=st.sidebar.file_uploader("File điện năng của tháng mới",type=["xlsx","xls"],key="new_month")
+if st.sidebar.button("➕ Cập nhật vào lịch sử",use_container_width=True,disabled=new_month_file is None):
+    try:
+        new_df=parse_customer_workbook(new_month_file)
+        old_df=load_customer_history()
+        merged_df=merge_customer_history(old_df,new_df)
+        if merged_df.empty: raise ValueError("File tháng mới không có dữ liệu hợp lệ")
+        old_latest=pd.to_datetime(old_df.date).max() if not old_df.empty else None
+        new_latest=pd.to_datetime(new_df.date).max()
+        save_customer_history(merged_df)
+        st.session_state.model_state.setdefault("events",[]).append({
+            "time":datetime.now().isoformat(timespec="seconds"),
+            "type":"monthly_update",
+            "from_latest":str(old_latest.date()) if old_latest is not None else None,
+            "new_latest":str(new_latest.date()),
+            "rows_received":int(len(new_df))
+        })
+        save_state(st.session_state.model_state)
+        st.sidebar.success(f"Đã cập nhật đến {new_latest.strftime('%m/%Y')}. Mô hình sẽ học lại sai số tự động.")
+        st.rerun()
+    except Exception as e: st.sidebar.error(f"Lỗi cập nhật tháng mới: {e}")
+
+st.sidebar.caption("Sau lần nạp nền đầu tiên, các tháng sau chỉ tải file tháng mới. Dữ liệu trùng Mã KH + tháng sẽ lấy bản mới nhất.")
+with st.sidebar.expander("Sao lưu / Khôi phục dữ liệu"):
+    st.download_button("⬇️ Tải gói sao lưu dữ liệu",backup_bundle_bytes(),"EVN_Forecast_Data_Backup.zip","application/zip",use_container_width=True)
+    restore_file=st.file_uploader("Khôi phục từ gói sao lưu (.zip)",type=["zip"],key="restore_bundle")
+    if restore_file is not None and st.button("♻️ Khôi phục dữ liệu",use_container_width=True):
+        try:
+            restore_bundle(restore_file.getvalue())
+            st.session_state.model_state=load_state()
+            st.success("Đã khôi phục dữ liệu và Model State")
+            st.rerun()
+        except Exception as e: st.error(str(e))
 
 st.sidebar.subheader("2) Mất điện / nguyên nhân sai số")
 try:
@@ -75,7 +137,7 @@ st.sidebar.subheader("4) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.5.1 – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.5.2 – Điện lực Thường Xuân")
 st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
@@ -103,22 +165,13 @@ def manual_to_outage(df):
     return pd.DataFrame(out)
 
 # -------- data --------
-frames=[]
-try:
-    if combined is not None: frames.append(parse_customer_workbook(combined))
-    if f2025 is not None: frames.append(parse_customer_workbook(f2025,2025))
-    if f2026 is not None: frames.append(parse_customer_workbook(f2026,2026))
-    if new_month_file is not None: frames.append(parse_customer_workbook(new_month_file))
-except Exception as e:st.error(f"Lỗi đọc dữ liệu KH: {e}")
-customer_long=pd.concat(frames,ignore_index=True).drop_duplicates(["customer_id","date"],keep="last") if frames else pd.DataFrame()
+# Dữ liệu khách hàng được đọc từ kho đã lưu. File tháng mới chỉ dùng để cập nhật kho qua nút ở sidebar.
+customer_long=load_customer_history()
 monthly=aggregate_monthly(customer_long)
-history=None
-if history_file is not None:
-    try:history=pd.read_csv(history_file) if history_file.name.lower().endswith(".csv") else pd.read_excel(history_file)
-    except Exception as e:st.warning(f"Không đọc được lịch sử tổng: {e}")
-series_actual=merge_total_history(history,monthly)
+history=load_total_history()
+series_actual=merge_total_history(history if not history.empty else None,monthly)
 if series_actual.empty:
-    st.info("Nạp file điện năng khách hàng để bắt đầu. File gộp có thể chứa các cột 'Điện năng tháng 1/2025' ... 'Điện năng tháng 8/2026'.")
+    st.info("Chưa có dữ liệu nền. Mở mục 📚 Dữ liệu nền ở thanh bên và nạp file gộp 2025–2026 một lần.")
     st.stop()
 
 # -------- outages: uploaded + manual --------
@@ -152,11 +205,13 @@ model_series=series_norm[["date","normalized_actual"]].rename(columns={"normaliz
 def _month_key(v):
     return pd.to_datetime(v).to_period("M").to_timestamp()
 
-def record_forecasts_to_state(state, forecast_df, weights):
+def record_forecasts_to_state(state, forecast_df, weights, source_latest_month=None):
     hist=list(state.get("forecast_history",[]))
     now=datetime.now().isoformat(timespec="seconds")
     existing={(str(x.get("target_month")), str(x.get("model")), str(x.get("run_month"))) for x in hist}
-    run_month=str(pd.Timestamp.today().to_period("M"))
+    if source_latest_month is None:
+        source_latest_month=pd.Timestamp.today().to_period("M").to_timestamp()
+    run_month=str(pd.to_datetime(source_latest_month).to_period("M"))
     for _,r in forecast_df.iterrows():
         tm=str(pd.to_datetime(r["date"]).to_period("M"))
         for c in [x for x in forecast_df.columns if x!="date"]:
@@ -174,9 +229,11 @@ def build_error_report(state, series_actual):
     if fh.empty:return pd.DataFrame(),pd.DataFrame()
     fh["target_month"]=pd.to_datetime(fh["target_month"],errors="coerce").dt.to_period("M").dt.to_timestamp()
     act=series_actual[["date","actual"]].copy();act["date"]=pd.to_datetime(act.date).dt.to_period("M").dt.to_timestamp()
-    # If multiple runs forecast same target/model, keep the latest forecast created before actual was known; here latest stored snapshot is used.
+    # Ưu tiên snapshot 1 bước: dự báo được tạo khi tháng thực tế mới nhất là tháng liền trước tháng mục tiêu.
+    fh["run_month_dt"]=pd.to_datetime(fh["run_month"],errors="coerce").dt.to_period("M").dt.to_timestamp()
+    fh["is_one_step"]=(fh["run_month_dt"]==(fh["target_month"]-pd.DateOffset(months=1)))
     if "created_at" in fh.columns:
-        fh=fh.sort_values("created_at").drop_duplicates(["target_month","model"],keep="last")
+        fh=fh.sort_values(["is_one_step","created_at"],ascending=[False,True]).drop_duplicates(["target_month","model"],keep="last")
     d=fh.merge(act,left_on="target_month",right_on="date",how="inner").drop(columns=["date"])
     if d.empty:return d,pd.DataFrame()
     d["sai_lech_kWh"]=d.actual-d.forecast_kwh
@@ -195,6 +252,14 @@ def build_error_report(state, series_actual):
 backtest=backtest_five_models(model_series,customer_long,hist_weather,outage_monthly,max_origins=10)
 forecast_df,weights=forecast_all(model_series,customer_long,hist_weather,fut_weather,outage_monthly,None,horizon,backtest)
 top100=top100_influence(customer_long,100)
+
+# Tự lưu snapshot dự báo theo tháng dữ liệu mới nhất. Khi tháng sau có thực tế, app tự đối chiếu sai số.
+_source_latest=pd.to_datetime(series_actual.date).max().to_period("M").to_timestamp()
+_before_count=len(st.session_state.model_state.get("forecast_history",[]))
+st.session_state.model_state=record_forecasts_to_state(st.session_state.model_state,forecast_df,weights,_source_latest)
+_after_count=len(st.session_state.model_state.get("forecast_history",[]))
+if _after_count>_before_count:
+    save_state(st.session_state.model_state)
 
 latest=series_norm.iloc[-1]
 best=backtest.iloc[0] if not backtest.empty else None
@@ -295,7 +360,7 @@ with t7:
     cA,cB=st.columns([1,3])
     with cA:
         if st.button("📌 Ghi nhận dự báo hiện tại",use_container_width=True):
-            st.session_state.model_state=record_forecasts_to_state(st.session_state.model_state,forecast_df,weights)
+            st.session_state.model_state=record_forecasts_to_state(st.session_state.model_state,forecast_df,weights,_source_latest)
             save_state(st.session_state.model_state)
             st.success("Đã lưu snapshot dự báo vào Model State")
     err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
@@ -439,4 +504,4 @@ with t10:
         err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
         if not err_detail.empty:err_detail.to_excel(w,sheet_name="Sai_so_chi_tiet",index=False)
         if not err_summary.empty:err_summary.to_excel(w,sheet_name="Tong_hop_sai_so",index=False)
-    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5.1",bio.getvalue(),"EVN_Forecast_1.5.1_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5.1",bio.getvalue(),"EVN_Forecast_1.5.2_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

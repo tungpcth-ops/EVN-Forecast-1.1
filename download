@@ -4,3 +4,7 @@
 *.csv
 __pycache__/
 .env
+data_store/
+model_state.json
+*.pyc
+__pycache__/
