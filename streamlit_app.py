@@ -11,15 +11,17 @@ from multi_model_engine import (
     top100_influence, industry_summary, backtest_five_models,
     forecast_all, adaptive_weights, calendar_features
 )
-from outage_engine import parse_outage_workbook, estimate_outage_losses, normalize_series_for_outages
+from outage_engine import (parse_outage_workbook, estimate_outage_losses, normalize_series_for_outages,
+                           auto_impact_ratio_by_consumption)
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
 from prompt_engine import build_chatgpt_prompt
 from data_store import (load_customer_history, save_customer_history, merge_customer_history,
                         load_total_history, save_total_history, load_meta, clear_store,
-                        backup_bundle_bytes, restore_bundle)
+                        backup_bundle_bytes, restore_bundle, load_outage_history, save_outage_history,
+                        merge_outage_history, delete_outage_records)
 
-st.set_page_config(page_title="EVN Forecast 1.5.2",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5.3",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -45,7 +47,7 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.5.2")
+st.sidebar.title("⚡ EVN Forecast 1.5.3")
 st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • Trợ lý ChatGPT không API")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
@@ -127,7 +129,24 @@ try:
     tpl=open("Mau_Nhat_ky_mat_dien.xlsx","rb").read();st.sidebar.download_button("⬇️ Mẫu nhật ký mất điện",tpl,"Mau_Nhat_ky_mat_dien.xlsx",use_container_width=True)
 except:pass
 outage_file=st.sidebar.file_uploader("Upload nhật ký mất điện",type=["xlsx"],key="outage")
-st.sidebar.caption("Có thể nhập Ngày, giờ bắt đầu/kết thúc, Mã KH, nguyên nhân sai số trong tab ⚡ Mất điện.")
+st.sidebar.caption("Nhật ký được lưu vết. Tỷ lệ phụ tải ảnh hưởng được app tự tính theo sản lượng KH bị mất điện / tổng sản lượng cùng tháng.")
+if outage_file is not None and st.sidebar.button("💾 Lưu/Cập nhật nhật ký mất điện", use_container_width=True):
+    try:
+        parsed_outage=parse_outage_workbook(outage_file)
+        parsed_outage["source"]="Upload Excel"
+        parsed_outage["saved_at"]=datetime.now().isoformat(timespec="seconds")
+        parsed_outage=auto_impact_ratio_by_consumption(parsed_outage, load_customer_history())
+        saved=merge_outage_history(load_outage_history(), parsed_outage)
+        save_outage_history(saved)
+        st.session_state.model_state.setdefault("events",[]).append({
+            "time":datetime.now().isoformat(timespec="seconds"),"type":"outage_log_update",
+            "rows_received":int(len(parsed_outage)),"rows_stored":int(len(saved))})
+        save_state(st.session_state.model_state)
+        st.sidebar.success(f"Đã lưu {len(parsed_outage)} dòng nhật ký. Tổng đang lưu: {len(saved)} dòng.")
+        st.rerun()
+    except Exception as e:
+        st.sidebar.error(f"Không lưu được nhật ký mất điện: {e}")
+st.sidebar.caption("Có thể nhập nhanh Ngày, giờ bắt đầu/kết thúc, Mã KH, nguyên nhân sai số trong phần ⚡ bên dưới.")
 
 st.sidebar.subheader("3) Dự báo")
 horizon=st.sidebar.selectbox("Số tháng dự báo",[1,3,6,12],index=1)
@@ -137,13 +156,14 @@ st.sidebar.subheader("4) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.5.2 – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.5.3 – Điện lực Thường Xuân")
 st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
-    st.caption("Dữ liệu nhập ở đây được đưa trực tiếp vào biến mất điện của mô hình. Có thể để trống và dùng file nhật ký chi tiết ở thanh bên.")
-    manual_default=pd.DataFrame(columns=["Ngày","Giờ bắt đầu","Giờ kết thúc","Mã KH","Nguyên nhân sai số","Tỷ lệ ảnh hưởng %"])
+    st.caption("Mỗi lần lưu sẽ ghi vết vào nhật ký. Không cần nhập tỷ lệ ảnh hưởng; app tự tính theo tỷ trọng sản lượng của các KH bị ảnh hưởng.")
+    manual_default=pd.DataFrame(columns=["Mã sự cố","Ngày","Giờ bắt đầu","Giờ kết thúc","Mã KH","Nguyên nhân sai số"])
     manual=st.data_editor(manual_default,num_rows="dynamic",use_container_width=True,key="manual_outages_top")
+    save_manual=st.button("💾 Lưu nhập nhanh vào nhật ký", use_container_width=True, key="save_manual_outages")
 
 def manual_to_outage(df):
     if df is None or df.empty:return pd.DataFrame()
@@ -160,9 +180,25 @@ def manual_to_outage(df):
         dt1=datetime.combine(d.date(),a);dt2=datetime.combine(d.date(),b)
         if dt2<=dt1:dt2+=timedelta(days=1)
         dur=(dt2-dt1).total_seconds()/3600
-        impact=pd.to_numeric(pd.Series([r.get("Tỷ lệ ảnh hưởng %",100)]),errors="coerce").fillna(100).iloc[0]/100
-        out.append({"event_id":f"MANUAL-{i+1}","date":d.normalize(),"start_time":a,"end_time":b,"duration_hours":dur,"tba":"","scope":"","reason":str(r.get("Nguyên nhân sai số","") or ""),"impact_ratio":float(np.clip(impact,0,1)),"note":"Nhập trực tiếp","customer_id":str(r.get("Mã KH","") or ""),"customer_name":"","power_kw":np.nan,"kwh_per_hour_input":np.nan,"time_factor":1.0})
+        eid=str(r.get("Mã sự cố","") or "").strip() or f"MANUAL-{d.strftime('%Y%m%d')}-{i+1}"
+        out.append({"event_id":eid,"date":d.normalize(),"start_time":a,"end_time":b,"duration_hours":dur,"tba":"","scope":"","reason":str(r.get("Nguyên nhân sai số","") or ""),"impact_ratio":1.0,"note":"Nhập trực tiếp","customer_id":str(r.get("Mã KH","") or ""),"customer_name":"","power_kw":np.nan,"kwh_per_hour_input":np.nan,"time_factor":1.0,"source":"Nhập nhanh","saved_at":datetime.now().isoformat(timespec="seconds")})
     return pd.DataFrame(out)
+
+if save_manual:
+    try:
+        mr=manual_to_outage(manual)
+        if mr.empty:
+            st.warning("Chưa có dòng nhập nhanh hợp lệ để lưu.")
+        else:
+            mr=auto_impact_ratio_by_consumption(mr, load_customer_history())
+            saved=merge_outage_history(load_outage_history(), mr)
+            save_outage_history(saved)
+            st.session_state.model_state.setdefault("events",[]).append({"time":datetime.now().isoformat(timespec="seconds"),"type":"outage_manual_update","rows_received":int(len(mr))})
+            save_state(st.session_state.model_state)
+            st.success(f"Đã lưu {len(mr)} dòng vào nhật ký mất điện.")
+            st.rerun()
+    except Exception as e:
+        st.error(f"Không lưu được nhập nhanh: {e}")
 
 # -------- data --------
 # Dữ liệu khách hàng được đọc từ kho đã lưu. File tháng mới chỉ dùng để cập nhật kho qua nút ở sidebar.
@@ -174,14 +210,11 @@ if series_actual.empty:
     st.info("Chưa có dữ liệu nền. Mở mục 📚 Dữ liệu nền ở thanh bên và nạp file gộp 2025–2026 một lần.")
     st.stop()
 
-# -------- outages: uploaded + manual --------
-outage_rows=pd.DataFrame(); outage_details=pd.DataFrame(); outage_monthly=pd.DataFrame()
-if outage_file is not None:
-    try: outage_rows=parse_outage_workbook(outage_file)
-    except Exception as e: st.error(f"Lỗi nhật ký mất điện: {e}")
-manual_rows=manual_to_outage(manual)
-if not manual_rows.empty:
-    outage_rows=pd.concat([outage_rows,manual_rows],ignore_index=True) if not outage_rows.empty else manual_rows
+# -------- outages: dùng nhật ký đã lưu vết --------
+outage_rows=load_outage_history(); outage_details=pd.DataFrame(); outage_monthly=pd.DataFrame()
+if not outage_rows.empty:
+    # luôn tính lại tỷ lệ ảnh hưởng theo sản lượng đang có trong kho dữ liệu
+    outage_rows=auto_impact_ratio_by_consumption(outage_rows, customer_long)
 
 # -------- weather --------
 weather_error=None
@@ -337,17 +370,35 @@ with t4:
         st.plotly_chart(px.pie(typ,names="customer_type",values="kwh",hole=.5,title="Cơ cấu điện năng theo loại khách hàng"),use_container_width=True)
 
 with t5:
-    st.subheader("Nhập mất điện và nguyên nhân sai số")
-    st.caption("Nhập trực tiếp để truy vết: ngày, giờ bắt đầu/kết thúc, Mã KH và nguyên nhân sai số. Với dữ liệu chính thức nên dùng file mẫu để ước sản lượng không thực hiện theo từng KH.")
-    if manual is not None and not manual.empty:
-        st.markdown("**Dữ liệu nhập nhanh đang dùng:**")
-        st.dataframe(manual,use_container_width=True,hide_index=True)
+    st.subheader("Nhật ký mất điện / nguyên nhân sai số")
+    st.caption("Nhật ký được lưu vết qua các lần cập nhật. Có thể xóa dòng nhập sai. TY_LE_PHU_TAI_ANH_HUONG được tự tính theo sản lượng của nhóm KH bị ảnh hưởng chia tổng sản lượng toàn đơn vị cùng tháng.")
+    saved_outages=load_outage_history()
+    if saved_outages.empty:
+        st.info("Chưa có nhật ký mất điện đã lưu. Hãy Upload mẫu ở thanh bên hoặc dùng Nhập nhanh.")
+    else:
+        show=saved_outages.copy()
+        show=auto_impact_ratio_by_consumption(show,customer_long)
+        show["Xóa"]=False
+        preferred=["Xóa","record_id","event_id","date","start_time","end_time","duration_hours","customer_id","customer_name","reason","TY_LE_PHU_TAI_ANH_HUONG_%","TY_TRONG_KH_TRONG_SU_CO_%","affected_kwh_month","system_kwh_month","source","saved_at"]
+        cols=[c for c in preferred if c in show.columns]+[c for c in show.columns if c not in preferred and c not in {"impact_ratio","event_impact_ratio","customer_share_in_event","month","event_affected_kwh"}]
+        edited=st.data_editor(show[cols],use_container_width=True,hide_index=True,disabled=[c for c in cols if c!="Xóa"],key="outage_delete_editor")
+        cdel,csave=st.columns([1,3])
+        with cdel:
+            if st.button("🗑️ Xóa dòng đã chọn",use_container_width=True):
+                ids=edited.loc[edited["Xóa"]==True,"record_id"].astype(str).tolist() if "Xóa" in edited.columns else []
+                if not ids: st.warning("Chưa chọn dòng cần xóa.")
+                else:
+                    delete_outage_records(ids)
+                    st.session_state.model_state.setdefault("events",[]).append({"time":datetime.now().isoformat(timespec="seconds"),"type":"outage_delete","record_ids":ids})
+                    save_state(st.session_state.model_state)
+                    st.success(f"Đã xóa {len(ids)} dòng và lưu vết thao tác.")
+                    st.rerun()
+        st.markdown("**Cách tính tỷ lệ tự động:** `Σ sản lượng tháng của KH bị ảnh hưởng / Tổng sản lượng toàn đơn vị cùng tháng × 100%`.")
     if not outage_details.empty:
-        st.subheader("Kết quả tính từ nhật ký upload")
+        st.subheader("Kết quả ước điện năng không thực hiện")
         st.dataframe(outage_details,use_container_width=True,hide_index=True)
         st.subheader("Tổng hợp theo tháng")
         st.dataframe(outage_monthly,use_container_width=True,hide_index=True)
-    else: st.info("Chưa có nhật ký mất điện upload. Bảng nhập tay ở trên được dùng làm hồ sơ nguyên nhân; để tính kWh mất chính xác theo KH, hãy tải mẫu và upload ở thanh bên.")
 
 with t6:
     st.subheader("Dự báo chính thức theo Adaptive Ensemble")

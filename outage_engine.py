@@ -263,7 +263,8 @@ def estimate_outage_losses(outage_rows, customer_long=None, total_series=None):
             else:
                 source = "Không đủ dữ liệu"
 
-        loss = baseline * dur * factor * impact if np.isfinite(baseline) else np.nan
+        effective_impact = 1.0 if (cid and cid.lower() not in {'nan','none'}) else impact
+        loss = baseline * dur * factor * effective_impact if np.isfinite(baseline) else np.nan
         baselines.append(baseline)
         sources.append(source)
         losses.append(loss)
@@ -302,3 +303,70 @@ def normalize_series_for_outages(series, outage_monthly):
     s["outage_lost_kwh"] = s["lost_kwh"].fillna(0.0)
     s["normalized_actual"] = s["actual"] + s["outage_lost_kwh"]
     return s.drop(columns=["lost_kwh"])
+
+
+
+def auto_impact_ratio_by_consumption(outage_rows, customer_long):
+    """Tự tính TY_LE_PHU_TAI_ANH_HUONG theo tỷ trọng sản lượng.
+
+    Công thức theo từng sự cố/tháng:
+      tỷ lệ phụ tải ảnh hưởng = tổng kWh tháng của các KH bị ảnh hưởng / tổng kWh toàn đơn vị cùng tháng.
+
+    Nếu tháng sự cố chưa có kWh thực tế, dùng kWh tháng gần nhất trước sự cố của từng KH và toàn đơn vị.
+    Với từng KH trong sự cố, customer_share_in_event là tỷ trọng kWh của KH trong tổng kWh nhóm bị ảnh hưởng.
+    """
+    if outage_rows is None or outage_rows.empty:
+        return outage_rows.copy() if outage_rows is not None else pd.DataFrame()
+    d = outage_rows.copy()
+    if customer_long is None or customer_long.empty:
+        d['affected_kwh_month'] = np.nan
+        d['system_kwh_month'] = np.nan
+        d['event_impact_ratio'] = d.get('impact_ratio', 1.0)
+        d['customer_share_in_event'] = np.nan
+        return d
+
+    c = customer_long.copy()
+    c['date'] = pd.to_datetime(c['date'], errors='coerce').dt.to_period('M').dt.to_timestamp()
+    c['customer_id'] = c['customer_id'].astype(str).str.strip()
+    c['kwh'] = pd.to_numeric(c['kwh'], errors='coerce').fillna(0.0)
+    totals = c.groupby('date', as_index=False)['kwh'].sum().rename(columns={'kwh':'system_kwh'})
+    total_map = dict(zip(totals['date'], totals['system_kwh']))
+
+    # lookup last known monthly kWh at or before event month for each customer
+    c = c.sort_values(['customer_id','date'])
+    rows=[]
+    for _, r in d.iterrows():
+        rr=r.copy()
+        month=pd.Timestamp(r['date']).to_period('M').to_timestamp()
+        cid=str(r.get('customer_id','') or '').strip()
+        kval=np.nan
+        if cid and cid.lower() not in {'nan','none'}:
+            cc=c[(c['customer_id']==cid) & (c['date']<=month)]
+            if not cc.empty:
+                exact=cc[cc['date']==month]
+                kval=float((exact.iloc[-1] if not exact.empty else cc.iloc[-1])['kwh'])
+        rr['affected_kwh_month']=kval
+        rows.append(rr)
+    d=pd.DataFrame(rows)
+
+    # system total: exact month if present; otherwise latest total <= event month
+    total_dates=sorted(total_map)
+    def system_total_for(month):
+        if month in total_map: return float(total_map[month])
+        prev=[x for x in total_dates if x<=month]
+        return float(total_map[prev[-1]]) if prev else np.nan
+    d['month']=pd.to_datetime(d['date']).dt.to_period('M').dt.to_timestamp()
+    d['system_kwh_month']=d['month'].map(system_total_for)
+
+    # calculate event-level affected consumption and ratio
+    evsum=d.groupby(['event_id','month'], dropna=False)['affected_kwh_month'].sum(min_count=1).rename('event_affected_kwh').reset_index()
+    d=d.merge(evsum,on=['event_id','month'],how='left')
+    d['event_impact_ratio']=(d['event_affected_kwh']/d['system_kwh_month']).replace([np.inf,-np.inf],np.nan).clip(0,1)
+    # rows without customer details fall back to imported ratio
+    fallback=pd.to_numeric(d.get('impact_ratio',1.0),errors='coerce').fillna(1.0).clip(0,1)
+    d['event_impact_ratio']=d['event_impact_ratio'].fillna(fallback)
+    d['impact_ratio']=d['event_impact_ratio']
+    d['customer_share_in_event']=(d['affected_kwh_month']/d['event_affected_kwh']).replace([np.inf,-np.inf],np.nan).clip(0,1)
+    d['TY_LE_PHU_TAI_ANH_HUONG_%']=d['event_impact_ratio']*100
+    d['TY_TRONG_KH_TRONG_SU_CO_%']=d['customer_share_in_event']*100
+    return d

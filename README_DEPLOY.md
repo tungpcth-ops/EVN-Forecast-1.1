@@ -1,22 +1,23 @@
-# EVN Forecast 1.5.2 – Dữ liệu nền nạp 1 lần
+# EVN Forecast 1.5.3 Web – Lưu vết nhật ký mất điện
 
-## Quy trình vận hành hàng tháng
+## Điểm mới
+- Nhật ký mất điện được lưu vào kho dữ liệu cùng lịch sử khách hàng.
+- Mỗi lần Upload hoặc nhập nhanh đều có nút Lưu/Cập nhật và ghi sự kiện vào Model State.
+- Có thể chọn từng dòng sai và bấm Xóa; thao tác xóa cũng được lưu vết.
+- Gói Sao lưu/Khôi phục dữ liệu đã bao gồm `outage_history.pkl.gz`.
+- `TY_LE_PHU_TAI_ANH_HUONG` không cần nhập tay.
 
-1. **Lần đầu**: mở mục `📚 Dữ liệu nền` và nạp file gộp 2025–2026 (hoặc file riêng 2025 + 2026), sau đó bấm **💾 Lưu dữ liệu nền**.
-2. App lưu lịch sử khách hàng vào `data_store/customer_history.pkl.gz` và Model State vào `model_state.json`.
-3. **Các tháng sau**: chỉ tải file tháng mới tại `➕ Cập nhật tháng mới` rồi bấm **➕ Cập nhật vào lịch sử**.
-4. App ghép theo `Mã KH + tháng`, ưu tiên số liệu file mới nếu trùng, sau đó tự chạy lại 5 mô hình.
-5. App tự lưu snapshot dự báo theo tháng dữ liệu gần nhất. Khi có số thực tế tháng sau, tab `🎯 Đối chiếu sai số` tự tính sai số dự báo–thực tế, MAPE/MAE/RMSE/Bias và xếp hạng lại mô hình.
-6. Adaptive Ensemble dùng kết quả back-test mới để cập nhật trọng số cho kỳ tiếp theo.
+### Công thức tự tính tỷ lệ phụ tải ảnh hưởng
+`Tỷ lệ ảnh hưởng = Tổng kWh tháng của các khách hàng bị ảnh hưởng / Tổng kWh toàn đơn vị cùng tháng × 100%`
 
-## Sao lưu dữ liệu
+Nếu tháng sự cố chưa có dữ liệu thực tế, app dùng sản lượng tháng gần nhất trước sự cố để ước tính.
 
-Trong sidebar có `Sao lưu / Khôi phục dữ liệu`:
-- **⬇️ Tải gói sao lưu dữ liệu**: chứa dữ liệu khách hàng đã ghép, lịch sử tổng, metadata và Model State.
-- **♻️ Khôi phục dữ liệu**: dùng file backup `.zip` nếu Streamlit bị reset.
+## Cách cập nhật website
+1. Giải nén ZIP.
+2. GitHub repository EVN Forecast hiện tại → Add file → Upload files.
+3. Upload toàn bộ file bên trong thư mục.
+4. Commit vào `main`.
+5. Streamlit tự redeploy.
 
-> Lưu ý: Streamlit Community Cloud không cam kết ổ đĩa cục bộ tồn tại vĩnh viễn sau restart/redeploy. Vì vậy để đạt đúng mục tiêu “file nền chỉ nạp một lần” trong vận hành bình thường, app lưu local; đồng thời nên tải gói backup sau mỗi lần cập nhật tháng mới. Nếu cần lưu vĩnh viễn hoàn toàn tự động, bước tiếp theo nên dùng Supabase/PostgreSQL hoặc Google Drive làm kho dữ liệu ngoài.
-
-## Cập nhật web
-
-Upload toàn bộ file của bản này lên repository GitHub hiện tại và Commit vào `main`. Streamlit sẽ redeploy tự động.
+## Lưu ý Streamlit Community Cloud
+Ổ đĩa cục bộ có thể bị reset khi redeploy. Sau mỗi kỳ cập nhật nên tải `EVN_Forecast_Data_Backup.zip`; file backup đã chứa cả lịch sử khách hàng, tổng điện thương phẩm, nhật ký mất điện và Model State.
