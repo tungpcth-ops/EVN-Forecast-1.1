@@ -14,9 +14,9 @@ from multi_model_engine import (
 from outage_engine import parse_outage_workbook, estimate_outage_losses, normalize_series_for_outages
 from weather_engine import fetch_history, fetch_forecast, apply_overrides, monthly_features, future_month_features
 from state_manager import load_state, save_state, state_to_bytes, merge_uploaded_state
-from ai_engine import get_openai_config, ask_openai
+from prompt_engine import build_chatgpt_prompt
 
-st.set_page_config(page_title="EVN Forecast 1.5 AI",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5.1",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -42,8 +42,8 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.5 AI")
-st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • ChatGPT AI")
+st.sidebar.title("⚡ EVN Forecast 1.5.1")
+st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • Trợ lý ChatGPT không API")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
     try:
@@ -75,7 +75,7 @@ st.sidebar.subheader("4) Thời tiết")
 st.sidebar.text_input("Địa điểm",WEATHER_LOCATION_NAME,disabled=True)
 st.sidebar.caption(f"Khóa tọa độ {WEATHER_LAT:.5f}, {WEATHER_LON:.5f}")
 
-st.title("⚡ EVN Forecast 1.5 AI – Điện lực Thường Xuân")
+st.title("⚡ EVN Forecast 1.5.1 – Điện lực Thường Xuân")
 st.caption("5 nhánh đối chiếu: Thống kê/tăng trưởng • Holt-Winters • SARIMA • Hồi quy đa biến • Bottom-up khách hàng")
 
 with st.expander("⚡ Nhập nhanh mất điện / nguyên nhân sai số", expanded=False):
@@ -209,7 +209,7 @@ if best is not None and pd.notna(best.MAPE) and best.MAPE>1.5:
     st.markdown(f'<div class="note"><b>⚠️ MAPE kiểm định tốt nhất hiện {best.MAPE:.2f}%</b> – chưa đạt mục tiêu 1,5%. Hệ thống vẫn chọn trọng số theo back-test và hiển thị nguyên nhân để tiếp tục hiệu chỉnh.</div>',unsafe_allow_html=True)
 
 # -------- tabs --------
-t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 ChatGPT AI","💾 Model State","📤 Xuất dữ liệu"])
+t1,t2,t3,t4,t5,t6,t7,t8,t9,t10=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 Trợ lý ChatGPT","💾 Model State","📤 Xuất dữ liệu"])
 
 with t1:
     fig=go.Figure()
@@ -336,18 +336,11 @@ with t7:
             st.dataframe(pd.concat([ch.nlargest(10,"chenh_kwh"),ch.nsmallest(10,"chenh_kwh")]).drop_duplicates().sort_values("chenh_kwh").style.format({"kwh_thang":"{:,.0f}","kwh_truoc":"{:,.0f}","chenh_kwh":"{:+,.0f}"}),use_container_width=True,hide_index=True)
 
 with t8:
-    st.subheader("🤖 ChatGPT AI – Phân tích EVN Forecast")
-    st.caption("AI chỉ nhận dữ liệu tổng hợp cần thiết, không gửi toàn bộ 20.000+ khách hàng. Mặc định tên KH được ẩn; chỉ bật nếu anh chủ động cho phép.")
+    st.subheader("🤖 Trợ lý ChatGPT – không cần API key")
+    st.caption("App không gọi OpenAI API và không phát sinh chi phí API. EVN Forecast chỉ tạo prompt đã tổng hợp dữ liệu; anh sao chép prompt rồi dán vào cuộc trò chuyện ChatGPT đang dùng.")
+    st.info("Quy trình: chọn loại phân tích → app tạo prompt → bấm biểu tượng sao chép trên khung mã → dán vào ChatGPT. Không cần Streamlit Secrets hay OPENAI_API_KEY.")
 
-    secret_key, secret_model = get_openai_config(st)
-    ai_model = st.text_input("Model OpenAI", value=secret_model, help="Có thể đặt OPENAI_MODEL trong Streamlit Secrets.")
-    session_key = st.text_input("API key phiên làm việc (tùy chọn)", type="password", help="Chỉ dùng trong phiên hiện tại, không lưu vào GitHub. Nên cấu hình OPENAI_API_KEY trong Streamlit Secrets.")
-    api_key = session_key.strip() or secret_key
-    include_names = st.checkbox("Cho phép gửi tên Top KH tới AI", value=False)
-    if api_key:
-        st.success("Đã phát hiện OpenAI API key. AI sẵn sàng.")
-    else:
-        st.warning("Chưa có OpenAI API key. Vào Streamlit > Manage app > Settings > Secrets và thêm OPENAI_API_KEY.")
+    include_names = st.checkbox("Cho phép đưa tên Top KH vào prompt", value=False, help="Tắt mặc định để hạn chế đưa tên khách hàng ra ngoài app. Khi tắt, tên khách hàng được thay bằng '(ẩn tên KH)'.")
 
     err_detail_ai, err_summary_ai = build_error_report(st.session_state.model_state, series_actual)
     latest_month = pd.to_datetime(series_actual.date).max().to_period("M").to_timestamp()
@@ -362,7 +355,6 @@ with t8:
     if not include_names and not changes.empty:
         changes = changes.copy(); changes["customer_name"] = "(ẩn tên KH)"
 
-    # Weather latest/future summary
     weather_payload = {}
     if not hist_weather.empty:
         wh = hist_weather.copy(); wh["date"] = pd.to_datetime(wh.date)
@@ -384,41 +376,44 @@ with t8:
         "weather": weather_payload,
         "outages": outage_payload,
         "customer_changes_top20": changes.to_dict("records"),
-        "top100_summary": {
-            "count": int(len(top100)),
-            "columns": list(top100.columns),
-        },
-        "data_note": "AI receives summary data only; raw customer workbook is not sent."
+        "top100_summary": {"count": int(len(top100)), "columns": list(top100.columns)},
+        "data_note": "Prompt chỉ chứa dữ liệu tổng hợp; file khách hàng gốc không được đưa vào prompt."
     }
 
-    col_ai1,col_ai2,col_ai3=st.columns(3)
-    def run_ai(task, q=""):
-        if not api_key:
-            st.error("Chưa cấu hình OpenAI API key."); return
-        with st.spinner("ChatGPT đang phân tích..."):
-            try:
-                ans=ask_openai(api_key, ai_model, task, payload, q)
-                st.session_state["last_ai_answer"]=ans
-                st.session_state.model_state.setdefault("ai_history",[]).append({"time":datetime.now().isoformat(timespec="seconds"),"task":task,"model":ai_model,"answer":ans})
-                st.markdown(ans)
-            except Exception as e:
-                st.error(f"Lỗi gọi OpenAI API: {e}")
-    with col_ai1:
-        if st.button("🧠 Phân tích dự báo",use_container_width=True):
-            run_ai("Phân tích dự báo hiện tại, so sánh 5 nhánh mô hình, giải thích trọng số Ensemble và nêu các rủi ro chính.")
-    with col_ai2:
-        if st.button("🎯 Giải trình sai số",use_container_width=True):
-            run_ai("Phân tích sai số dự báo so với thực tế. Tách nguyên nhân do mô hình, thời tiết, mất điện, mùa vụ và biến động khách hàng; nêu phần nào định lượng được.")
-    with col_ai3:
-        if st.button("📄 Soạn báo cáo lãnh đạo",use_container_width=True):
-            run_ai("Soạn báo cáo ngắn trình lãnh đạo về kết quả dự báo, chất lượng mô hình, nguyên nhân biến động và đề xuất cập nhật kỳ tiếp theo.")
+    if "last_chatgpt_prompt" not in st.session_state:
+        st.session_state["last_chatgpt_prompt"] = ""
+
+    c1,c2,c3=st.columns(3)
+    if c1.button("🧠 Tạo prompt phân tích dự báo", use_container_width=True):
+        task = "Phân tích dự báo hiện tại, so sánh 5 nhánh mô hình, giải thích back-test, MAPE/MAE/RMSE, trọng số Ensemble, tác động thời tiết/mùa vụ/mất điện/khách hàng và nêu rủi ro chính."
+        st.session_state["last_chatgpt_prompt"] = build_chatgpt_prompt(task, payload)
+    if c2.button("🎯 Tạo prompt giải trình sai số", use_container_width=True):
+        task = "Phân tích chi tiết sai số dự báo so với thực tế. Tách nguyên nhân do mô hình, thời tiết, mất điện, ngày nghỉ/lễ, mùa vụ, ngành nghề và biến động khách hàng; định lượng phần nào dữ liệu cho phép và nêu phần cần xác minh. Soạn nội dung có thể dùng làm giải trình."
+        st.session_state["last_chatgpt_prompt"] = build_chatgpt_prompt(task, payload)
+    if c3.button("📄 Tạo prompt báo cáo lãnh đạo", use_container_width=True):
+        task = "Soạn báo cáo ngắn trình lãnh đạo về kết quả dự báo điện thương phẩm, chất lượng 5 mô hình và Ensemble, chênh lệch dự báo-thực tế, các yếu tố thời tiết/mất điện/khách hàng ảnh hưởng và đề xuất kỳ tiếp theo."
+        st.session_state["last_chatgpt_prompt"] = build_chatgpt_prompt(task, payload)
 
     st.divider()
-    q=st.text_area("Hỏi AI về dữ liệu dự báo",placeholder="Ví dụ: Vì sao dự báo tháng 10 giảm? Mô hình nào đáng tin nhất? Top nguyên nhân sai số tháng 8 là gì?")
-    if st.button("💬 Hỏi ChatGPT",use_container_width=True):
-        run_ai("Trả lời câu hỏi của người dùng dựa trên dữ liệu EVN Forecast được cung cấp.",q)
-    if st.session_state.get("last_ai_answer"):
-        st.download_button("⬇️ Tải phân tích AI (.txt)",st.session_state["last_ai_answer"].encode("utf-8"),"EVN_Forecast_AI_Analysis.txt","text/plain")
+    q=st.text_area("Câu hỏi tùy chỉnh cho ChatGPT",placeholder="Ví dụ: Vì sao dự báo tháng 10 giảm? Mô hình nào đang ổn định nhất? Top nguyên nhân sai số tháng 8 là gì?")
+    if st.button("💬 Tạo prompt theo câu hỏi của tôi",use_container_width=True):
+        task = "Trả lời câu hỏi của người dùng dựa trên dữ liệu EVN Forecast được cung cấp, có đối chiếu các mô hình và các yếu tố ảnh hưởng liên quan."
+        st.session_state["last_chatgpt_prompt"] = build_chatgpt_prompt(task, payload, q)
+
+    prompt = st.session_state.get("last_chatgpt_prompt", "")
+    if prompt:
+        st.success("Prompt đã sẵn sàng. Bấm biểu tượng sao chép ở góc khung bên dưới, sau đó dán vào ChatGPT.")
+        st.code(prompt, language=None, wrap_lines=True)
+        st.download_button("⬇️ Tải prompt (.txt)", prompt.encode("utf-8"), "EVN_Forecast_ChatGPT_Prompt.txt", "text/plain", use_container_width=True)
+        st.text_area("Hoặc chọn toàn bộ nội dung tại đây để Ctrl+C", value=prompt, height=240)
+        st.session_state.model_state.setdefault("prompt_history",[]).append({
+            "time": datetime.now().isoformat(timespec="seconds"),
+            "latest_month": str(latest_month.date()),
+            "include_customer_names": bool(include_names),
+            "chars": len(prompt),
+        })
+    else:
+        st.caption("Chọn một trong ba nút phía trên để tạo prompt. App không cần API key và không gửi dữ liệu tự động tới ChatGPT.")
 
 with t9:
     st.subheader("Model State")
@@ -444,4 +439,4 @@ with t10:
         err_detail,err_summary=build_error_report(st.session_state.model_state,series_actual)
         if not err_detail.empty:err_detail.to_excel(w,sheet_name="Sai_so_chi_tiet",index=False)
         if not err_summary.empty:err_summary.to_excel(w,sheet_name="Tong_hop_sai_so",index=False)
-    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5 AI",bio.getvalue(),"EVN_Forecast_1.5_AI_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    st.download_button("⬇️ Tải Excel kết quả EVN Forecast 1.5.1",bio.getvalue(),"EVN_Forecast_1.5.1_Ket_qua.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

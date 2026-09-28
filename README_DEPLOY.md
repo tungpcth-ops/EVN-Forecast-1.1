@@ -1,39 +1,34 @@
-# EVN Forecast 1.5 AI – Web Deploy
+# EVN Forecast 1.5.1 – Trợ lý ChatGPT không cần API key
 
-Phiên bản 1.5 bổ sung tab **ChatGPT AI** trên nền EVN Forecast 1.4.1 Multi-Model.
+Phiên bản 1.5.1 giữ nguyên toàn bộ EVN Forecast Multi-Model và thay phần gọi OpenAI API bằng **Trợ lý ChatGPT tạo prompt**.
 
-## Chức năng AI
-- Phân tích 5 nhánh mô hình và Adaptive Ensemble.
-- Giải trình sai số dự báo – thực tế.
-- Phân tích tác động thời tiết, mùa vụ, mất điện và Top khách hàng.
-- Soạn báo cáo ngắn trình lãnh đạo.
-- Ô hỏi tự do “Hỏi AI về dữ liệu dự báo”.
-- Lưu lịch sử phân tích AI trong Model State.
+## Điểm mới
+- Không cần `OPENAI_API_KEY`.
+- Không gọi OpenAI API, không phát sinh chi phí API.
+- Tab **🤖 Trợ lý ChatGPT** tạo prompt sẵn cho 3 tình huống:
+  1. Phân tích dự báo và so sánh 5 nhánh mô hình.
+  2. Giải trình sai số dự báo – thực tế.
+  3. Soạn báo cáo lãnh đạo.
+- Có ô câu hỏi tùy chỉnh.
+- Prompt tự mang theo dữ liệu tổng hợp: back-test, MAPE/MAE/RMSE, trọng số Ensemble, forecast, sai số, thời tiết, mất điện và Top biến động khách hàng.
+- Mặc định ẩn tên khách hàng; chỉ đưa tên Top KH vào prompt khi người dùng chủ động bật.
+- Có khung `st.code` để sao chép nhanh và nút tải prompt `.txt`.
 
-## Bảo mật dữ liệu
-Mặc định ứng dụng **không gửi toàn bộ file khách hàng lên OpenAI**. Chỉ gửi dữ liệu tổng hợp cần thiết: back-test, forecast, trọng số, sai số, thời tiết, mất điện và Top biến động. Tên khách hàng được ẩn mặc định; chỉ gửi tên khi người dùng bật tùy chọn.
+## Quy trình sử dụng
+1. Nạp/cập nhật dữ liệu tháng mới và chạy EVN Forecast.
+2. Mở tab **🤖 Trợ lý ChatGPT**.
+3. Chọn loại prompt cần tạo.
+4. Bấm biểu tượng sao chép trên khung prompt hoặc tải file `.txt`.
+5. Dán prompt vào cuộc trò chuyện ChatGPT đang sử dụng.
 
-## Cấu hình OpenAI trên Streamlit Cloud
-Không ghi API key vào GitHub.
+Không cần vào `Streamlit > Manage app > Settings > Secrets` và không cần cấu hình API key.
 
-Vào:
-`Streamlit > Manage app > Settings > Secrets`
-
-Thêm:
-```toml
-OPENAI_API_KEY = "sk-..."
-OPENAI_MODEL = "gpt-5.6-terra"
-```
-
-Có thể dùng `gpt-5.6` nếu muốn chất lượng cao hơn. Ứng dụng gọi **OpenAI Responses API** bằng Python SDK chính thức.
-
-## Cập nhật website hiện tại
+## Cập nhật web hiện tại
 1. Giải nén ZIP.
-2. GitHub repo hiện tại > Add file > Upload files.
+2. GitHub repo hiện tại > **Add file > Upload files**.
 3. Kéo toàn bộ file bên trong lên.
-4. Commit changes vào `main`.
+4. Commit vào nhánh `main`.
 5. Streamlit tự redeploy.
 
-## Lưu ý
-- File `.streamlit/secrets.example.toml` chỉ là mẫu, không chứa khóa thật.
-- Nếu dùng ô nhập API key trong app, key chỉ tồn tại trong phiên Streamlit hiện tại và không được ghi vào Model State.
+## Khuyến nghị GitHub
+Không upload thư mục `__pycache__`, file `.pyc`, API key, hoặc file dữ liệu khách hàng vào repository public.
