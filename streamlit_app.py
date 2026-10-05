@@ -21,9 +21,10 @@ from data_store import (load_customer_history, save_customer_history, merge_cust
                         load_total_history, save_total_history, load_meta, clear_store,
                         backup_bundle_bytes, restore_bundle, load_outage_history, save_outage_history,
                         merge_outage_history, delete_outage_records, load_fixed_forecasts, save_fixed_forecasts,
-                        merge_fixed_forecasts, delete_fixed_forecast_records)
+                        merge_fixed_forecasts, delete_fixed_forecast_records, load_official_totals, save_official_totals,
+                        merge_official_totals, delete_official_total)
 
-st.set_page_config(page_title="EVN Forecast 1.5.4",page_icon="⚡",layout="wide")
+st.set_page_config(page_title="EVN Forecast 1.5.5",page_icon="⚡",layout="wide")
 
 WEATHER_LOCATION_NAME="Xã Thường Xuân, tỉnh Thanh Hóa"
 WEATHER_LAT=19.90389
@@ -49,7 +50,7 @@ def load_weather_forecast(): return fetch_forecast(WEATHER_LAT,WEATHER_LON,16)
 if "model_state" not in st.session_state:
     st.session_state.model_state=load_state()
 
-st.sidebar.title("⚡ EVN Forecast 1.5.4")
+st.sidebar.title("⚡ EVN Forecast 1.5.5")
 st.sidebar.caption("Multi-Model • Back-test • Weather • Bottom-up • Outage • Trợ lý ChatGPT không API")
 state_upload=st.sidebar.file_uploader("Khôi phục Model State (.json)",type=["json"])
 if state_upload:
@@ -90,6 +91,26 @@ with st.sidebar.expander("Nạp/Thay dữ liệu nền", expanded=not has_store)
             else:
                 st.warning("Hãy chọn ít nhất một file dữ liệu nền.")
         except Exception as e: st.error(f"Không lưu được dữ liệu nền: {e}")
+
+st.sidebar.subheader("1A) ✅ ĐTP chính thức (override)")
+st.sidebar.caption("Số ĐTP báo cáo chính thức sẽ được dùng làm ACTUAL chuẩn cho mô hình. Dữ liệu KH vẫn giữ nguyên để phân tích nguyên nhân.")
+official_saved=load_official_totals()
+with st.sidebar.expander("Nhập / sửa ĐTP chính thức", expanded=False):
+    default_official_month=(pd.Timestamp.today().to_period("M")-1).to_timestamp().date()
+    off_month=st.date_input("Tháng số liệu",value=default_official_month,key="official_month")
+    off_kwh=st.number_input("Điện thương phẩm chính thức (kWh)",min_value=0.0,step=1000.0,format="%.0f",key="official_kwh")
+    off_note=st.text_input("Nguồn/Ghi chú",value="Số liệu báo cáo chính thức",key="official_note")
+    c1,c2=st.columns(2)
+    if c1.button("💾 Lưu",use_container_width=True,disabled=off_kwh<=0):
+        row=pd.DataFrame([{"date":pd.to_datetime(off_month).to_period("M").to_timestamp(),"actual":float(off_kwh),"note":off_note}])
+        save_official_totals(merge_official_totals(load_official_totals(),row))
+        st.session_state.model_state.setdefault("events",[]).append({"time":datetime.now().isoformat(timespec="seconds"),"type":"official_actual_override","month":str(row.iloc[0]["date"].date()),"actual":float(off_kwh)})
+        save_state(st.session_state.model_state);st.success("Đã lưu ĐTP chính thức");st.rerun()
+    if c2.button("🗑️ Xóa tháng",use_container_width=True):
+        delete_official_total(off_month);st.success("Đã xóa override tháng đã chọn");st.rerun()
+if not official_saved.empty:
+    last_off=official_saved.sort_values("date").iloc[-1]
+    st.sidebar.success(f"ĐTP chính thức gần nhất: {pd.to_datetime(last_off['date']).strftime('%m/%Y')} = {fmt(last_off['actual'])} kWh")
 
 st.sidebar.subheader("1B) ➕ Cập nhật tháng mới")
 new_month_file=st.sidebar.file_uploader("File điện năng của tháng mới",type=["xlsx","xls"],key="new_month")
@@ -231,7 +252,12 @@ customer_long=load_customer_history()
 fixed_forecasts=enrich_with_customer_names(load_fixed_forecasts(),customer_long)
 monthly=aggregate_monthly(customer_long)
 history=load_total_history()
-series_actual=merge_total_history(history if not history.empty else None,monthly)
+series_actual_raw=merge_total_history(history if not history.empty else None,monthly)
+official_totals=load_official_totals()
+series_actual=series_actual_raw.copy()
+if not official_totals.empty:
+    # Số chính thức ưu tiên tuyệt đối theo tháng; dữ liệu KH không bị thay đổi.
+    series_actual=merge_total_history(series_actual_raw,official_totals[["date","actual"]])
 if series_actual.empty:
     st.info("Chưa có dữ liệu nền. Mở mục 📚 Dữ liệu nền ở thanh bên và nạp file gộp 2025–2026 một lần.")
     st.stop()
@@ -339,6 +365,12 @@ if best is not None and pd.notna(best.MAPE) and best.MAPE>1.5:
 t1,t2,t3,t4,t5,t6,t7,t8,t9,t10,t11=st.tabs(["📊 Tổng quan","📈 5 mô hình","🌦️ Thời tiết","👥 Khách hàng","⚡ Mất điện","🔮 Dự báo","🎯 Đối chiếu sai số","🤖 Trợ lý ChatGPT","💾 Model State","📤 Xuất dữ liệu","📌 KH dự báo cứng"])
 
 with t1:
+    if not official_totals.empty:
+        chk=monthly.merge(official_totals[["date","actual"]].rename(columns={"actual":"official_actual"}),on="date",how="inner")
+        if not chk.empty:
+            chk["customer_sum"]=chk["actual"]; chk["difference_kwh"]=chk["official_actual"]-chk["customer_sum"]
+            latest_chk=chk.sort_values("date").iloc[-1]
+            st.info(f"✅ ACTUAL mô hình ưu tiên số ĐTP chính thức. {pd.to_datetime(latest_chk['date']).strftime('%m/%Y')}: chính thức {fmt(latest_chk['official_actual'])} kWh; tổng KH {fmt(latest_chk['customer_sum'])} kWh; chênh {fmt(latest_chk['difference_kwh'])} kWh.")
     fig=go.Figure()
     fig.add_trace(go.Scatter(x=series_norm.date,y=series_norm.actual,mode="lines+markers",name="Thực tế"))
     if series_norm.outage_lost_kwh.sum()>0: fig.add_trace(go.Scatter(x=series_norm.date,y=series_norm.normalized_actual,mode="lines+markers",name="Chuẩn hóa mất điện",line=dict(dash="dot")))

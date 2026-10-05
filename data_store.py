@@ -185,7 +185,7 @@ def clear_store() -> None:
 def backup_bundle_bytes() -> bytes:
     bio = io.BytesIO()
     with zipfile.ZipFile(bio, 'w', compression=zipfile.ZIP_DEFLATED) as z:
-        for p in [CUSTOMERS_PATH, TOTAL_HISTORY_PATH, OUTAGE_HISTORY_PATH, FIXED_FORECAST_PATH, META_PATH, STATE_PATH]:
+        for p in [CUSTOMERS_PATH, TOTAL_HISTORY_PATH, OUTAGE_HISTORY_PATH, FIXED_FORECAST_PATH, OFFICIAL_TOTALS_PATH, META_PATH, STATE_PATH]:
             if p.exists():
                 z.write(p, arcname=p.name if p == STATE_PATH else f'data_store/{p.name}')
     return bio.getvalue()
@@ -199,6 +199,7 @@ def restore_bundle(raw: bytes) -> dict:
             'data_store/total_history.pkl.gz': TOTAL_HISTORY_PATH,
             'data_store/outage_history.pkl.gz': OUTAGE_HISTORY_PATH,
             'data_store/fixed_customer_forecasts.pkl.gz': FIXED_FORECAST_PATH,
+            'data_store/official_monthly_totals.pkl.gz': OFFICIAL_TOTALS_PATH,
             'data_store/data_meta.json': META_PATH,
             'model_state.json': STATE_PATH,
         }
@@ -207,3 +208,41 @@ def restore_bundle(raw: bytes) -> dict:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(z.read(name))
     return load_meta()
+
+OFFICIAL_TOTALS_PATH = STORE_DIR / 'official_monthly_totals.pkl.gz'
+
+def load_official_totals() -> pd.DataFrame:
+    if not OFFICIAL_TOTALS_PATH.exists():
+        return pd.DataFrame(columns=['date','actual','note'])
+    try:
+        return pd.read_pickle(OFFICIAL_TOTALS_PATH, compression='gzip')
+    except Exception:
+        return pd.DataFrame(columns=['date','actual','note'])
+
+def save_official_totals(df: pd.DataFrame) -> None:
+    _ensure_dir()
+    if df is None: df = pd.DataFrame(columns=['date','actual','note'])
+    x=df.copy()
+    if not x.empty:
+        x['date']=pd.to_datetime(x['date'],errors='coerce').dt.to_period('M').dt.to_timestamp()
+        x['actual']=pd.to_numeric(x['actual'],errors='coerce')
+        if 'note' not in x.columns: x['note']=''
+        x=x.dropna(subset=['date','actual']).sort_values('date').drop_duplicates('date',keep='last')
+    x.to_pickle(OFFICIAL_TOTALS_PATH,compression='gzip')
+
+def merge_official_totals(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    parts=[x for x in [old,new] if x is not None and not x.empty]
+    if not parts: return pd.DataFrame(columns=['date','actual','note'])
+    x=pd.concat(parts,ignore_index=True)
+    x['date']=pd.to_datetime(x['date'],errors='coerce').dt.to_period('M').dt.to_timestamp()
+    x['actual']=pd.to_numeric(x['actual'],errors='coerce')
+    if 'note' not in x.columns: x['note']=''
+    return x.dropna(subset=['date','actual']).sort_values('date').drop_duplicates('date',keep='last').reset_index(drop=True)
+
+def delete_official_total(month) -> pd.DataFrame:
+    df=load_official_totals()
+    m=pd.to_datetime(month).to_period('M').to_timestamp()
+    if not df.empty:
+        df=df[pd.to_datetime(df['date']).dt.to_period('M').dt.to_timestamp()!=m].reset_index(drop=True)
+        save_official_totals(df)
+    return df
